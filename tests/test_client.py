@@ -84,6 +84,11 @@ async def test_open_channel():
     client._writer = writer
     client._connected = True
     client._receive_task = asyncio.create_task(client._receive_loop())
+    # Yield once so the receive loop starts and enters its polling state before
+    # we feed data. On Python 3.11, wait_for() wraps the coroutine in a new
+    # task, so without this yield the receive loop can run first and consume
+    # the response before open_channel has registered the channel.
+    await asyncio.sleep(0)
 
     # Feed the command response (server assigns channel id 42)
     reader.feed(_make_command_response(server_channel_id=42))
@@ -119,6 +124,7 @@ async def test_send_json_and_receive():
     client._writer = writer
     client._connected = True
     client._receive_task = asyncio.create_task(client._receive_loop())
+    await asyncio.sleep(0)  # let receive loop enter polling state (Python 3.11 compat)
 
     # Feed command response to open channel
     reader.feed(_make_command_response(server_channel_id=100))
@@ -176,6 +182,7 @@ async def test_concurrent_send_json_on_same_channel():
     client._writer = writer
     client._connected = True
     client._receive_task = asyncio.create_task(client._receive_loop())
+    await asyncio.sleep(0)  # let receive loop enter polling state (Python 3.11 compat)
 
     reader.feed(_make_command_response(server_channel_id=100))
 

@@ -178,6 +178,11 @@ async def _setup_client():
     client._writer = writer
     client._connected = True
     client._receive_task = asyncio.create_task(client._receive_loop())
+    # Yield once so the receive loop enters its polling state before data is fed.
+    # On Python 3.11, wait_for() wraps coroutines in a new task, so without this
+    # yield the receive loop can run first and consume responses before
+    # open_channel has registered the channel.
+    await asyncio.sleep(0)
     return client, reader, writer
 
 
