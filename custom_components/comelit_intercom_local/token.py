@@ -68,7 +68,7 @@ async def extract_token(
             create_response = await resp.text()
             if "Backup successfully created" not in create_response:
                 _LOGGER.error("Backup creation failed: %s", create_response)
-                return None
+                raise TokenExtractionError("Backup creation failed")
 
         # Wait for the device to finish creating the backup file
         await asyncio.sleep(2)
@@ -109,9 +109,11 @@ async def extract_token(
 
 def _parse_token_from_archive(archive_data: bytes) -> str | None:
     """Parse the authentication token from a backup tar.gz archive."""
+    members_seen: list[str] = []
     try:
         with tarfile.open(fileobj=io.BytesIO(archive_data), mode="r:gz") as tar:
             for member in tar.getmembers():
+                members_seen.append(member.name)
                 if member.name.endswith("users.cfg"):
                     f = tar.extractfile(member)
                     if f is None:
@@ -133,7 +135,15 @@ def _parse_token_from_archive(archive_data: bytes) -> str | None:
                                 _LOGGER.debug("Extracted token: %s...%s", token[:4], token[-4:])
                                 return token
 
+                    raise TokenExtractionError(
+                        f"Token pattern not found in users.cfg "
+                        f"(file size: {len(content)} bytes)"
+                    )
+
     except tarfile.TarError as e:
         raise TokenExtractionError(f"Failed to read backup archive: {e}") from e
 
-    raise TokenExtractionError("Token not found in backup archive")
+    raise TokenExtractionError(
+        f"users.cfg not found in backup archive. "
+        f"Members seen: {members_seen}"
+    )

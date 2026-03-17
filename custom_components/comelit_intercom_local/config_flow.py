@@ -59,10 +59,6 @@ class ComelitLocalConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     _LOGGER.exception("Token extraction failed: %s", err)
                     errors["base"] = "token_extraction_failed"
 
-                if not errors and not token:
-                    # extract_token returned None without raising — treat as failure
-                    errors["base"] = "token_extraction_failed"
-
             if not errors:
                 client = IconaBridgeClient(host, port)
                 try:
