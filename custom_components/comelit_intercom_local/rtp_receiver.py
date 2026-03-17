@@ -12,6 +12,7 @@ from .protocol import HEADER_SIZE, ICONA_BRIDGE_PORT
 
 _LOGGER = logging.getLogger(__name__)
 
+_MAX_CONSECUTIVE_ERRORS = 5
 
 
 def _build_control_packet(
@@ -282,6 +283,7 @@ class RtpReceiver:
         codec = av.CodecContext.create("h264", "r")
         h264_buffer = bytearray()
         frame_count = 0
+        consecutive_errors = 0
 
         try:
             while self._running:
@@ -314,12 +316,21 @@ class RtpReceiver:
                                             frame_count, frame.width, frame.height,
                                             len(jpeg_data),
                                         )
+                        consecutive_errors = 0
                     except av.error.InvalidDataError:
                         _LOGGER.debug("Invalid H.264 data, skipping")
                         h264_buffer.clear()
+                        consecutive_errors = 0
                     except Exception:
                         _LOGGER.debug("Decode error", exc_info=True)
                         h264_buffer.clear()
+                        consecutive_errors += 1
+                        if consecutive_errors >= _MAX_CONSECUTIVE_ERRORS:
+                            _LOGGER.error(
+                                "Decode loop stopping after %d consecutive errors",
+                                consecutive_errors,
+                            )
+                            break
 
         except asyncio.CancelledError:
             pass
