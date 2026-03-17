@@ -1,4 +1,4 @@
-# Comelit Local
+# Comelit Intercom Local
 
 Home Assistant custom component for the **Comelit 6701W** WiFi video intercom. Communicates via the ICONA Bridge TCP protocol — no cloud required.
 
@@ -20,18 +20,18 @@ Home Assistant custom component for the **Comelit 6701W** WiFi video intercom. C
 ### HACS (Recommended)
 
 1. Add this repository as a custom repository in HACS
-2. Install **Comelit Local**
+2. Install **Comelit Intercom Local**
 3. Restart Home Assistant
 
 ### Manual
 
-1. Copy the `custom_components/comelit_local/` folder to your HA `config/custom_components/` directory
+1. Copy the `custom_components/comelit_intercom_local/` folder to your HA `config/custom_components/` directory
 2. Restart Home Assistant
 
 ## Configuration
 
 1. Go to **Settings → Devices & Services → Add Integration**
-2. Search for **Comelit Local**
+2. Search for **Comelit Intercom Local**
 3. Enter your device IP and either:
    - Your device password (token will be extracted automatically), or
    - A pre-extracted 32-character hex token
@@ -51,7 +51,7 @@ automation:
   - alias: "Notify on doorbell ring"
     trigger:
       - platform: state
-        entity_id: event.comelit_local_doorbell
+        entity_id: event.comelit_intercom_local_doorbell
         attribute: event_type
         to: "doorbell_ring"
     action:
@@ -64,7 +64,7 @@ automation:
 
 ```
 custom_components/
-  comelit_local/
+  comelit_intercom_local/
     __init__.py          # HA integration setup
     config_flow.py       # UI setup with auto token extraction
     coordinator.py       # DataUpdateCoordinator
@@ -128,4 +128,4 @@ Protocol knowledge derived from community reverse-engineering efforts:
 
 ## License
 
-MIT
+Apache 2.0
