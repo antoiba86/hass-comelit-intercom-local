@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+    branches: ["main", "fix/**", "ci/**", "feature/**"]
+  pull_request:
+    branches: ["main"]
+
+jobs:
+  test:
+    name: Unit tests (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest pytest-asyncio
+
+      - name: Run unit tests
+        run: |
+          PYTHONPATH=. pytest \
+            tests/test_protocol.py \
+            tests/test_client.py \
+            tests/test_rtp_receiver.py \
+            tests/test_token.py \
+            tests/test_video_call.py \
+            tests/test_video_signaling.py \
+            -v
