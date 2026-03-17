@@ -79,5 +79,5 @@ def _parse_push_event(raw: dict) -> PushEvent | None:
         )
 
     # Log unknown messages for discovery
-    _LOGGER.debug("Unknown push message: %s", raw)
+    _LOGGER.warning("Unknown push message type %r: %s", msg_type, raw)
     return None

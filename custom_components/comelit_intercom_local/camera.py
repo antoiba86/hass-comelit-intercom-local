@@ -131,6 +131,7 @@ class ComelitIntercomCamera(Camera):
         """Start a video call session."""
         config = self._coordinator.device_config
         if not config:
+            _LOGGER.warning("Cannot start video: device config not available")
             return
         try:
             await self._coordinator.async_start_video()

@@ -74,8 +74,14 @@ async def _open_regular_door(
     init_payload = encode_ctpp_init(apt_addr, apt_sub)
     await client.send_binary(channel, init_payload)
     # Read 2 responses (timeout is OK)
-    await client.read_response(channel, timeout=DOOR_RESPONSE_TIMEOUT)
-    await client.read_response(channel, timeout=DOOR_RESPONSE_TIMEOUT)
+    resp = await client.read_response(channel, timeout=DOOR_RESPONSE_TIMEOUT)
+    _LOGGER.debug("CTPP init resp1: %s", resp.hex() if resp else None)
+    if resp is None:
+        _LOGGER.warning("No response to CTPP init (step 1)")
+    resp = await client.read_response(channel, timeout=DOOR_RESPONSE_TIMEOUT)
+    _LOGGER.debug("CTPP init resp2: %s", resp.hex() if resp else None)
+    if resp is None:
+        _LOGGER.warning("No response to CTPP init (step 2)")
 
     # Phase B: Open door + confirm
     await _send_open_and_confirm(client, channel, apt_addr, door)
@@ -83,8 +89,14 @@ async def _open_regular_door(
     # Phase C: Door-specific init
     door_init = encode_door_init(apt_addr, door.output_index, door.apt_address)
     await client.send_binary(channel, door_init)
-    await client.read_response(channel, timeout=DOOR_RESPONSE_TIMEOUT)
-    await client.read_response(channel, timeout=DOOR_RESPONSE_TIMEOUT)
+    resp = await client.read_response(channel, timeout=DOOR_RESPONSE_TIMEOUT)
+    _LOGGER.debug("Door init resp1: %s", resp.hex() if resp else None)
+    if resp is None:
+        _LOGGER.warning("No response to door init (step 1)")
+    resp = await client.read_response(channel, timeout=DOOR_RESPONSE_TIMEOUT)
+    _LOGGER.debug("Door init resp2: %s", resp.hex() if resp else None)
+    if resp is None:
+        _LOGGER.warning("No response to door init (step 2)")
 
     # Phase D: Open door + confirm again
     await _send_open_and_confirm(client, channel, apt_addr, door)
@@ -118,14 +130,26 @@ async def _open_actuator(
     # Phase A: CTPP init (same as regular door)
     init_payload = encode_ctpp_init(apt_addr, apt_sub)
     await client.send_binary(channel, init_payload)
-    await client.read_response(channel, timeout=DOOR_RESPONSE_TIMEOUT)
-    await client.read_response(channel, timeout=DOOR_RESPONSE_TIMEOUT)
+    resp = await client.read_response(channel, timeout=DOOR_RESPONSE_TIMEOUT)
+    _LOGGER.debug("CTPP init resp1: %s", resp.hex() if resp else None)
+    if resp is None:
+        _LOGGER.warning("No response to CTPP init (step 1)")
+    resp = await client.read_response(channel, timeout=DOOR_RESPONSE_TIMEOUT)
+    _LOGGER.debug("CTPP init resp2: %s", resp.hex() if resp else None)
+    if resp is None:
+        _LOGGER.warning("No response to CTPP init (step 2)")
 
     # Actuator init
     act_init = encode_actuator_init(apt_addr, door.output_index, door.apt_address)
     await client.send_binary(channel, act_init)
-    await client.read_response(channel, timeout=DOOR_RESPONSE_TIMEOUT)
-    await client.read_response(channel, timeout=DOOR_RESPONSE_TIMEOUT)
+    resp = await client.read_response(channel, timeout=DOOR_RESPONSE_TIMEOUT)
+    _LOGGER.debug("Actuator init resp1: %s", resp.hex() if resp else None)
+    if resp is None:
+        _LOGGER.warning("No response to actuator init (step 1)")
+    resp = await client.read_response(channel, timeout=DOOR_RESPONSE_TIMEOUT)
+    _LOGGER.debug("Actuator init resp2: %s", resp.hex() if resp else None)
+    if resp is None:
+        _LOGGER.warning("No response to actuator init (step 2)")
 
     # Actuator open + confirm
     open_payload = encode_actuator_open(apt_addr, door.output_index, door.apt_address, confirm=False)

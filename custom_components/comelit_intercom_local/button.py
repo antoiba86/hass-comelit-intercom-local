@@ -60,7 +60,10 @@ class ComelitDoorButton(CoordinatorEntity[ComelitLocalCoordinator], ButtonEntity
     async def async_press(self) -> None:
         """Open the door when pressed."""
         _LOGGER.info("Opening door: %s", self._door.name)
-        await self.coordinator.async_open_door(self._door)
+        try:
+            await self.coordinator.async_open_door(self._door)
+        except Exception:
+            _LOGGER.exception("Failed to open door %s", self._door.name)
 
 
 class ComelitStartVideoButton(CoordinatorEntity[ComelitLocalCoordinator], ButtonEntity):
@@ -84,7 +87,10 @@ class ComelitStartVideoButton(CoordinatorEntity[ComelitLocalCoordinator], Button
         if not self.coordinator.device_config:
             return
         _LOGGER.info("Starting intercom video")
-        await self.coordinator.async_start_video()
+        try:
+            await self.coordinator.async_start_video()
+        except Exception:
+            _LOGGER.exception("Failed to start intercom video")
 
 
 class ComelitStopVideoButton(CoordinatorEntity[ComelitLocalCoordinator], ButtonEntity):
@@ -106,4 +112,7 @@ class ComelitStopVideoButton(CoordinatorEntity[ComelitLocalCoordinator], ButtonE
     async def async_press(self) -> None:
         """Stop intercom video when pressed."""
         _LOGGER.info("Stopping intercom video")
-        await self.coordinator.async_stop_video()
+        try:
+            await self.coordinator.async_stop_video()
+        except Exception:
+            _LOGGER.exception("Failed to stop intercom video")
