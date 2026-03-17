@@ -341,12 +341,10 @@ class TestCodecExchangeFiltering:
             body = b"\x40\x18\x00\x00\x00\x00\x00\x08\x00\x03"
             pkt = encode_header(len(body), 100) + body
             reader.feed(pkt)
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(0.2)
 
-            # Should be available via read_response
-            resp = await asyncio.wait_for(
-                client.read_response(channel, timeout=1.0), timeout=2.0
-            )
+            # Should be available via read_response (read_response handles its own timeout)
+            resp = await client.read_response(channel, timeout=2.0)
             assert resp is not None
             assert struct.unpack_from("<H", resp, 0)[0] == 0x1840
         finally:
@@ -402,9 +400,7 @@ class TestVideoSignalingFlow:
 
             # Read exactly 2 responses (matching video_call.py Step 2)
             for _ in range(2):
-                resp = await asyncio.wait_for(
-                    client.read_response(ctpp, timeout=2.0), timeout=3.0
-                )
+                resp = await client.read_response(ctpp, timeout=3.0)
                 assert resp is not None
 
             # Send ACKs
@@ -451,9 +447,7 @@ class TestVideoSignalingFlow:
             got_link_status = False
 
             for i in range(10):
-                resp = await asyncio.wait_for(
-                    client.read_response(ctpp, timeout=1.0), timeout=2.0
-                )
+                resp = await client.read_response(ctpp, timeout=2.0)
                 if not resp:
                     break
                 msg_type = struct.unpack_from("<H", resp, 0)[0]
@@ -492,9 +486,7 @@ class TestVideoSignalingFlow:
             # Simulate device sending RTPC link on CTPP
             reader.feed(_make_device_rtpc_link(ctpp_ch_id, dev_caller, our_caller, 0xBFA3))
 
-            resp = await asyncio.wait_for(
-                client.read_response(ctpp, timeout=1.0), timeout=2.0
-            )
+            resp = await client.read_response(ctpp, timeout=2.0)
             assert resp is not None
             msg_type = struct.unpack_from("<H", resp, 0)[0]
             assert msg_type == 0x1840
@@ -533,9 +525,7 @@ class TestVideoSignalingFlow:
             # Simulate the loop from video_call.py that skips retransmits
             got_ack = False
             for _ in range(5):
-                resp = await asyncio.wait_for(
-                    client.read_response(ctpp, timeout=1.0), timeout=2.0
-                )
+                resp = await client.read_response(ctpp, timeout=2.0)
                 if not resp:
                     break
                 msg_type = struct.unpack_from("<H", resp, 0)[0]

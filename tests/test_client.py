@@ -192,8 +192,10 @@ async def test_concurrent_send_json_on_same_channel():
         await asyncio.sleep(0.05)
         assert not blocked_task.done(), "send_json should block while lock is held"
 
-        # Release lock — feed response so send_json can complete
+        # Release lock — yield so send_json can acquire it and register its
+        # callback before we feed the response.
         channel.send_lock.release()
+        await asyncio.sleep(0)
         reader.feed(_make_json_response(100, {"response-code": 200}))
         result = await asyncio.wait_for(blocked_task, timeout=3.0)
         assert result["response-code"] == 200
