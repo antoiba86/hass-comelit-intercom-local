@@ -6,6 +6,7 @@ from collections.abc import Callable
 import contextlib
 from datetime import timedelta
 import logging
+from typing import TypeAlias
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
@@ -23,8 +24,6 @@ from .video_call import VideoCallSession
 _LOGGER = logging.getLogger(__name__)
 
 UPDATE_INTERVAL = timedelta(seconds=30)
-
-type ComelitLocalConfigEntry = ConfigEntry[ComelitLocalCoordinator]
 
 
 class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
@@ -177,3 +176,6 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
             raise UpdateFailed(f"Reconnect failed: {err}") from err
 
         return self._config  # type: ignore[return-value]
+
+
+ComelitLocalConfigEntry: TypeAlias = ConfigEntry[ComelitLocalCoordinator]

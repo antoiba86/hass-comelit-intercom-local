@@ -26,3 +26,5 @@ htmlcov/
 
 # Home Assistant
 *.log
+
+docs/
