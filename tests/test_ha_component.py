@@ -7,14 +7,14 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from custom_components.comelit_local.models import Camera, DeviceConfig, Door, PushEvent
+from custom_components.comelit_intercom_local.models import Camera, DeviceConfig, Door, PushEvent
 
 # Import after conftest has set up mocked HA modules
-from custom_components.comelit_local.coordinator import (
+from custom_components.comelit_intercom_local.coordinator import (
     ComelitLocalCoordinator,
     UpdateFailed,
 )
-from custom_components.comelit_local.exceptions import (
+from custom_components.comelit_intercom_local.exceptions import (
     AuthenticationError,
     ConnectionError as ComelitConnectionError,
 )
@@ -74,20 +74,20 @@ class TestCoordinatorSetup:
 
         with (
             patch(
-                "custom_components.comelit_local.coordinator.IconaBridgeClient",
+                "custom_components.comelit_intercom_local.coordinator.IconaBridgeClient",
                 return_value=client,
             ),
             patch(
-                "custom_components.comelit_local.coordinator.authenticate",
+                "custom_components.comelit_intercom_local.coordinator.authenticate",
                 new_callable=AsyncMock,
             ),
             patch(
-                "custom_components.comelit_local.coordinator.get_device_config",
+                "custom_components.comelit_intercom_local.coordinator.get_device_config",
                 new_callable=AsyncMock,
                 return_value=config,
             ),
             patch(
-                "custom_components.comelit_local.coordinator.register_push",
+                "custom_components.comelit_intercom_local.coordinator.register_push",
                 new_callable=AsyncMock,
             ),
         ):
@@ -105,11 +105,11 @@ class TestCoordinatorSetup:
 
         with (
             patch(
-                "custom_components.comelit_local.coordinator.IconaBridgeClient",
+                "custom_components.comelit_intercom_local.coordinator.IconaBridgeClient",
                 return_value=client,
             ),
             patch(
-                "custom_components.comelit_local.coordinator.authenticate",
+                "custom_components.comelit_intercom_local.coordinator.authenticate",
                 new_callable=AsyncMock,
                 side_effect=AuthenticationError("bad token"),
             ),
@@ -128,15 +128,15 @@ class TestCoordinatorSetup:
 
         with (
             patch(
-                "custom_components.comelit_local.coordinator.IconaBridgeClient",
+                "custom_components.comelit_intercom_local.coordinator.IconaBridgeClient",
                 return_value=client,
             ),
             patch(
-                "custom_components.comelit_local.coordinator.authenticate",
+                "custom_components.comelit_intercom_local.coordinator.authenticate",
                 new_callable=AsyncMock,
             ),
             patch(
-                "custom_components.comelit_local.coordinator.get_device_config",
+                "custom_components.comelit_intercom_local.coordinator.get_device_config",
                 new_callable=AsyncMock,
                 side_effect=RuntimeError("parse error"),
             ),
@@ -155,20 +155,20 @@ class TestCoordinatorSetup:
 
         with (
             patch(
-                "custom_components.comelit_local.coordinator.IconaBridgeClient",
+                "custom_components.comelit_intercom_local.coordinator.IconaBridgeClient",
                 return_value=client,
             ),
             patch(
-                "custom_components.comelit_local.coordinator.authenticate",
+                "custom_components.comelit_intercom_local.coordinator.authenticate",
                 new_callable=AsyncMock,
             ),
             patch(
-                "custom_components.comelit_local.coordinator.get_device_config",
+                "custom_components.comelit_intercom_local.coordinator.get_device_config",
                 new_callable=AsyncMock,
                 return_value=_make_config(),
             ),
             patch(
-                "custom_components.comelit_local.coordinator.register_push",
+                "custom_components.comelit_intercom_local.coordinator.register_push",
                 new_callable=AsyncMock,
                 side_effect=RuntimeError("push fail"),
             ),
@@ -284,20 +284,20 @@ class TestCoordinatorReconnect:
 
         with (
             patch(
-                "custom_components.comelit_local.coordinator.IconaBridgeClient",
+                "custom_components.comelit_intercom_local.coordinator.IconaBridgeClient",
                 return_value=new_client,
             ),
             patch(
-                "custom_components.comelit_local.coordinator.authenticate",
+                "custom_components.comelit_intercom_local.coordinator.authenticate",
                 new_callable=AsyncMock,
             ),
             patch(
-                "custom_components.comelit_local.coordinator.get_device_config",
+                "custom_components.comelit_intercom_local.coordinator.get_device_config",
                 new_callable=AsyncMock,
                 return_value=config,
             ),
             patch(
-                "custom_components.comelit_local.coordinator.register_push",
+                "custom_components.comelit_intercom_local.coordinator.register_push",
                 new_callable=AsyncMock,
             ),
         ):
@@ -319,7 +319,7 @@ class TestCoordinatorReconnect:
 
         with (
             patch(
-                "custom_components.comelit_local.coordinator.IconaBridgeClient",
+                "custom_components.comelit_intercom_local.coordinator.IconaBridgeClient",
                 return_value=new_client,
             ),
             pytest.raises(OSError),
@@ -405,7 +405,7 @@ class TestConfigFlow:
     """Tests for ComelitLocalConfigFlow.async_step_user()."""
 
     def _make_flow(self):
-        from custom_components.comelit_local.config_flow import (
+        from custom_components.comelit_intercom_local.config_flow import (
             ComelitLocalConfigFlow,
         )
 
@@ -437,11 +437,11 @@ class TestConfigFlow:
 
         with (
             patch(
-                "custom_components.comelit_local.client.IconaBridgeClient",
+                "custom_components.comelit_intercom_local.client.IconaBridgeClient",
                 return_value=client,
             ),
             patch(
-                "custom_components.comelit_local.auth.authenticate",
+                "custom_components.comelit_intercom_local.auth.authenticate",
                 new_callable=AsyncMock,
             ),
         ):
@@ -461,11 +461,11 @@ class TestConfigFlow:
 
         with (
             patch(
-                "custom_components.comelit_local.client.IconaBridgeClient",
+                "custom_components.comelit_intercom_local.client.IconaBridgeClient",
                 return_value=client,
             ),
             patch(
-                "custom_components.comelit_local.auth.authenticate",
+                "custom_components.comelit_intercom_local.auth.authenticate",
                 new_callable=AsyncMock,
                 side_effect=AuthenticationError("bad"),
             ),
@@ -484,7 +484,7 @@ class TestConfigFlow:
         client.connect.side_effect = ComelitConnectionError("refused")
 
         with patch(
-            "custom_components.comelit_local.client.IconaBridgeClient",
+            "custom_components.comelit_intercom_local.client.IconaBridgeClient",
             return_value=client,
         ):
             result = await flow.async_step_user(self._base_input())
@@ -501,7 +501,7 @@ class TestConfigFlow:
 
         with (
             patch(
-                "custom_components.comelit_local.client.IconaBridgeClient",
+                "custom_components.comelit_intercom_local.client.IconaBridgeClient",
                 return_value=client,
             ),
             patch(
@@ -524,15 +524,15 @@ class TestConfigFlow:
 
         with (
             patch(
-                "custom_components.comelit_local.client.IconaBridgeClient",
+                "custom_components.comelit_intercom_local.client.IconaBridgeClient",
                 return_value=client,
             ),
             patch(
-                "custom_components.comelit_local.auth.authenticate",
+                "custom_components.comelit_intercom_local.auth.authenticate",
                 new_callable=AsyncMock,
             ),
             patch(
-                "custom_components.comelit_local.token.extract_token",
+                "custom_components.comelit_intercom_local.token.extract_token",
                 new_callable=AsyncMock,
                 return_value="extracted_token_123",
             ),
@@ -548,7 +548,7 @@ class TestConfigFlow:
         flow = self._make_flow()
 
         with patch(
-            "custom_components.comelit_local.token.extract_token",
+            "custom_components.comelit_intercom_local.token.extract_token",
             new_callable=AsyncMock,
             side_effect=RuntimeError("no backup"),
         ):
@@ -570,7 +570,7 @@ class TestSetupUnload:
     async def test_setup_entry_success(self):
         """Setup succeeds → coordinator stored in hass.data, platforms forwarded."""
         from custom_components.comelit_local import async_setup_entry
-        from custom_components.comelit_local.const import DOMAIN
+        from custom_components.comelit_intercom_local.const import DOMAIN
 
         hass = _make_hass()
         entry = MagicMock()
@@ -581,20 +581,20 @@ class TestSetupUnload:
 
         with (
             patch(
-                "custom_components.comelit_local.coordinator.IconaBridgeClient",
+                "custom_components.comelit_intercom_local.coordinator.IconaBridgeClient",
                 return_value=_mock_client(),
             ),
             patch(
-                "custom_components.comelit_local.coordinator.authenticate",
+                "custom_components.comelit_intercom_local.coordinator.authenticate",
                 new_callable=AsyncMock,
             ),
             patch(
-                "custom_components.comelit_local.coordinator.get_device_config",
+                "custom_components.comelit_intercom_local.coordinator.get_device_config",
                 new_callable=AsyncMock,
                 return_value=config,
             ),
             patch(
-                "custom_components.comelit_local.coordinator.register_push",
+                "custom_components.comelit_intercom_local.coordinator.register_push",
                 new_callable=AsyncMock,
             ),
         ):
@@ -619,11 +619,11 @@ class TestSetupUnload:
 
         with (
             patch(
-                "custom_components.comelit_local.coordinator.IconaBridgeClient",
+                "custom_components.comelit_intercom_local.coordinator.IconaBridgeClient",
                 return_value=_mock_client(),
             ),
             patch(
-                "custom_components.comelit_local.coordinator.authenticate",
+                "custom_components.comelit_intercom_local.coordinator.authenticate",
                 new_callable=AsyncMock,
                 side_effect=AuthenticationError("bad"),
             ),
@@ -638,7 +638,7 @@ class TestSetupUnload:
             async_setup_entry,
             async_unload_entry,
         )
-        from custom_components.comelit_local.const import DOMAIN
+        from custom_components.comelit_intercom_local.const import DOMAIN
 
         hass = _make_hass()
         entry = MagicMock()
@@ -650,20 +650,20 @@ class TestSetupUnload:
 
         with (
             patch(
-                "custom_components.comelit_local.coordinator.IconaBridgeClient",
+                "custom_components.comelit_intercom_local.coordinator.IconaBridgeClient",
                 return_value=mock_client,
             ),
             patch(
-                "custom_components.comelit_local.coordinator.authenticate",
+                "custom_components.comelit_intercom_local.coordinator.authenticate",
                 new_callable=AsyncMock,
             ),
             patch(
-                "custom_components.comelit_local.coordinator.get_device_config",
+                "custom_components.comelit_intercom_local.coordinator.get_device_config",
                 new_callable=AsyncMock,
                 return_value=config,
             ),
             patch(
-                "custom_components.comelit_local.coordinator.register_push",
+                "custom_components.comelit_intercom_local.coordinator.register_push",
                 new_callable=AsyncMock,
             ),
         ):

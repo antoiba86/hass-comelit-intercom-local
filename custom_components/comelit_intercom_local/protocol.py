@@ -12,6 +12,15 @@ HEADER_MAGIC = b"\x00\x06" # All messages start with these magic bytes
 ICONA_BRIDGE_PORT = 64100 # TCP port for ICONA Bridge protocol
 NULL = b"\x00"
 
+# CTPP init message magic byte sequences (from PCAP analysis)
+_CTPP_INIT_FLAGS1 = bytes([0x00, 0x11])
+_CTPP_INIT_FLAGS2 = bytes([0x00, 0x40])  # possibly capability bitmask
+_CTPP_INIT_SEPARATOR = bytes([0x10, 0x0E])
+_CTPP_INIT_ZERO_PAD = bytes([0x00, 0x00, 0x00, 0x00])
+_CTPP_ADDR_WILDCARD = bytes([0xFF, 0xFF, 0xFF, 0xFF])
+_CTPP_LEGACY_TS = bytes([0x5C, 0x8B, 0x2B, 0x73])  # hardcoded timestamp for door open flow
+
+
 class MessageType(IntEnum):
     """Binary message type constants."""
 
@@ -155,17 +164,16 @@ def encode_ctpp_init(
     if timestamp is not None:
         buf += struct.pack("<I", timestamp)
     else:
-        # Legacy hardcoded values (used by door open flow)
-        buf += bytes([0x5C, 0x8B, 0x2B, 0x73])
-    buf += bytes([0x00, 0x11])
-    buf += bytes([0x00, 0x40])
+        buf += _CTPP_LEGACY_TS
+    buf += _CTPP_INIT_FLAGS1
+    buf += _CTPP_INIT_FLAGS2
     # Mystery bytes — echoed back by device; PCAP shows varying values
     # but the device accepts any value here.
     buf += struct.pack("<H", (timestamp or 0x238BAC) & 0xFFFF)
     buf += _null_terminated(addr_with_sub)
-    buf += bytes([0x10, 0x0E])
-    buf += bytes([0x00, 0x00, 0x00, 0x00])
-    buf += bytes([0xFF, 0xFF, 0xFF, 0xFF])
+    buf += _CTPP_INIT_SEPARATOR
+    buf += _CTPP_INIT_ZERO_PAD
+    buf += _CTPP_ADDR_WILDCARD
     buf += _null_terminated(addr_with_sub)
     buf += _null_terminated(apt_address)
     buf += b"\x00"

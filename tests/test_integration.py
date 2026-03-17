@@ -22,7 +22,7 @@ pytestmark = pytest.mark.skipif(
 async def test_extract_token():
     """Extract token from device backup."""
     pytest.importorskip("aiohttp")
-    from custom_components.comelit_local.token import extract_token
+    from custom_components.comelit_intercom_local.token import extract_token
 
     token = await extract_token(COMELIT_HOST, password=COMELIT_PASSWORD)
     assert len(token) == 32
@@ -36,8 +36,8 @@ async def test_connect_and_authenticate():
     if not COMELIT_TOKEN:
         pytest.skip("COMELIT_TOKEN not set")
 
-    from custom_components.comelit_local.client import IconaBridgeClient
-    from custom_components.comelit_local.auth import authenticate
+    from custom_components.comelit_intercom_local.client import IconaBridgeClient
+    from custom_components.comelit_intercom_local.auth import authenticate
 
     client = IconaBridgeClient(COMELIT_HOST)
     await client.connect()
@@ -54,9 +54,9 @@ async def test_get_config():
     if not COMELIT_TOKEN:
         pytest.skip("COMELIT_TOKEN not set")
 
-    from custom_components.comelit_local.client import IconaBridgeClient
-    from custom_components.comelit_local.auth import authenticate
-    from custom_components.comelit_local.config_reader import get_device_config
+    from custom_components.comelit_intercom_local.client import IconaBridgeClient
+    from custom_components.comelit_intercom_local.auth import authenticate
+    from custom_components.comelit_intercom_local.config_reader import get_device_config
 
     client = IconaBridgeClient(COMELIT_HOST)
     await client.connect()
@@ -79,11 +79,11 @@ async def test_open_door():
     if not os.environ.get("COMELIT_TEST_DOOR"):
         pytest.skip("Set COMELIT_TEST_DOOR=1 to actually open a door")
 
-    from custom_components.comelit_local.client import IconaBridgeClient
-    from custom_components.comelit_local.auth import authenticate
-    from custom_components.comelit_local.config_reader import get_device_config
-    from custom_components.comelit_local.door import open_door
-    from custom_components.comelit_local.protocol import ICONA_BRIDGE_PORT
+    from custom_components.comelit_intercom_local.client import IconaBridgeClient
+    from custom_components.comelit_intercom_local.auth import authenticate
+    from custom_components.comelit_intercom_local.config_reader import get_device_config
+    from custom_components.comelit_intercom_local.door import open_door
+    from custom_components.comelit_intercom_local.protocol import ICONA_BRIDGE_PORT
 
     client = IconaBridgeClient(COMELIT_HOST)
     await client.connect()
@@ -106,10 +106,10 @@ async def test_push_listener():
     if not os.environ.get("COMELIT_TEST_PUSH"):
         pytest.skip("Set COMELIT_TEST_PUSH=1 to listen for push events")
 
-    from custom_components.comelit_local.client import IconaBridgeClient
-    from custom_components.comelit_local.auth import authenticate
-    from custom_components.comelit_local.config_reader import get_device_config
-    from custom_components.comelit_local.push import register_push
+    from custom_components.comelit_intercom_local.client import IconaBridgeClient
+    from custom_components.comelit_intercom_local.auth import authenticate
+    from custom_components.comelit_intercom_local.config_reader import get_device_config
+    from custom_components.comelit_intercom_local.push import register_push
 
     events = []
 

@@ -6,13 +6,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from custom_components.comelit_local.client import IconaBridgeClient
-from custom_components.comelit_local.protocol import (
+from custom_components.comelit_intercom_local.client import IconaBridgeClient
+from custom_components.comelit_intercom_local.protocol import (
     HEADER_SIZE,
     MessageType,
     encode_header,
 )
-from custom_components.comelit_local.channels import ChannelType
+from custom_components.comelit_intercom_local.channels import ChannelType
 
 
 def _make_command_response(server_channel_id: int, sequence: int = 2) -> bytes:

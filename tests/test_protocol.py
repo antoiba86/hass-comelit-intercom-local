@@ -2,10 +2,11 @@
 
 import struct
 
-from custom_components.comelit_local.protocol import (
+from custom_components.comelit_intercom_local.protocol import (
     HEADER_MAGIC,
     HEADER_SIZE,
     MessageType,
+    _CTPP_LEGACY_TS,
     decode_header,
     encode_channel_close,
     encode_channel_open,
@@ -17,7 +18,7 @@ from custom_components.comelit_local.protocol import (
     is_json_body,
     parse_command_response,
 )
-from custom_components.comelit_local.channels import ChannelType
+from custom_components.comelit_intercom_local.channels import ChannelType
 
 
 class TestHeader:
@@ -139,3 +140,12 @@ class TestDoorPayloads:
         assert payload[:4] == bytes([0xC0, 0x18, 0x70, 0xAB])
         # output_index as LE uint32
         assert struct.pack("<I", 1) in payload
+
+    def test_ctpp_init_with_timestamp_differs_from_legacy(self):
+        """encode_ctpp_init with a timestamp must differ from the legacy hardcoded one."""
+        with_ts = encode_ctpp_init("SB000006", 1, timestamp=0x12345678)
+        legacy = encode_ctpp_init("SB000006", 1)
+        # the timestamp bytes at positions 2-5 must differ
+        assert with_ts[2:6] != legacy[2:6]
+        # legacy payload must embed _CTPP_LEGACY_TS
+        assert _CTPP_LEGACY_TS in legacy

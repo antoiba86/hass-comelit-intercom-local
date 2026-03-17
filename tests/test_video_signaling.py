@@ -10,10 +10,10 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from custom_components.comelit_local.channels import Channel, ChannelType
-from custom_components.comelit_local.client import IconaBridgeClient
-from custom_components.comelit_local.models import DeviceConfig
-from custom_components.comelit_local.protocol import (
+from custom_components.comelit_intercom_local.channels import Channel, ChannelType
+from custom_components.comelit_intercom_local.client import IconaBridgeClient
+from custom_components.comelit_intercom_local.models import DeviceConfig
+from custom_components.comelit_intercom_local.protocol import (
     HEADER_SIZE,
     MessageType,
     encode_call_response_ack,
@@ -390,7 +390,7 @@ class TestVideoSignalingFlow:
             )
 
             # Send CTPP init (simulate what video_call.py does)
-            from custom_components.comelit_local.protocol import encode_ctpp_init
+            from custom_components.comelit_intercom_local.protocol import encode_ctpp_init
             init_payload = encode_ctpp_init("SB000006", 1)
             await client.send_binary(ctpp, init_payload)
 
@@ -563,7 +563,7 @@ class TestVideoProtocolEncoding:
 
     def test_encode_call_init_structure(self):
         """Call init should have 0x18C0 prefix and action 0x0028."""
-        from custom_components.comelit_local.protocol import encode_call_init
+        from custom_components.comelit_intercom_local.protocol import encode_call_init
         msg = encode_call_init("SB0000061", "SB100001", 0x12345678)
         prefix = struct.unpack_from("<H", msg, 0)[0]
         assert prefix == 0x18C0
@@ -575,7 +575,7 @@ class TestVideoProtocolEncoding:
 
     def test_encode_call_ack_structure(self):
         """Codec ack should have 0x1840 prefix and action 0x0008."""
-        from custom_components.comelit_local.protocol import encode_call_ack
+        from custom_components.comelit_intercom_local.protocol import encode_call_ack
         msg = encode_call_ack("SB0000061", "SB100001", 0x12345678)
         prefix = struct.unpack_from("<H", msg, 0)[0]
         assert prefix == 0x1840
@@ -584,7 +584,7 @@ class TestVideoProtocolEncoding:
 
     def test_encode_rtpc_link_structure(self):
         """RTPC link should have action 0x000A and embed the RTPC req_id."""
-        from custom_components.comelit_local.protocol import encode_rtpc_link
+        from custom_components.comelit_intercom_local.protocol import encode_rtpc_link
         msg = encode_rtpc_link("SB0000061", "SB100001", 0x21B5, 0x12345678)
         prefix = struct.unpack_from("<H", msg, 0)[0]
         assert prefix == 0x1840
@@ -595,7 +595,7 @@ class TestVideoProtocolEncoding:
 
     def test_encode_video_config_structure(self):
         """Video config should have action 0x001A and contain resolution."""
-        from custom_components.comelit_local.protocol import encode_video_config
+        from custom_components.comelit_intercom_local.protocol import encode_video_config
         msg = encode_video_config("SB0000061", "SB100001", 0x21B6, 0x12345678)
         prefix = struct.unpack_from("<H", msg, 0)[0]
         assert prefix == 0x1840
