@@ -138,14 +138,17 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
             raise RuntimeError("Not configured")
         await open_door(self.host, self.port, self.token, self._config, door)
 
-    async def async_start_video(self) -> VideoCallSession:
+    async def async_start_video(
+        self, auto_timeout: bool = True
+    ) -> VideoCallSession:
         """Start a video call session using a fresh connection."""
         if not self._config:
             raise RuntimeError("Not configured")
         # Stop any existing session first
         await self.async_stop_video()
         session = VideoCallSession(
-            self.host, self.port, self.token, self._config
+            self.host, self.port, self.token, self._config,
+            auto_timeout=auto_timeout,
         )
         await session.start()
         self._video_session = session
