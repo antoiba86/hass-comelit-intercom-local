@@ -4,7 +4,6 @@ Home Assistant custom component for the **Comelit 6701W** WiFi video intercom. C
 
 ## Features
 
-- **Doorbell notifications** — real-time push events when someone rings
 - **Remote door opening** — open doors/gates from Home Assistant
 - **Camera streaming** — RTSP video feed in HA dashboards
 - **100% local** — all communication stays on your LAN
@@ -13,7 +12,7 @@ Home Assistant custom component for the **Comelit 6701W** WiFi video intercom. C
 
 - Comelit 6701W (or compatible ICONA Bridge device)
 - Device accessible on your local network
-- Home Assistant 2024.1+
+- Home Assistant 2026.1+
 
 ## Installation
 
@@ -60,51 +59,6 @@ automation:
           message: "Someone is at the door!"
 ```
 
-## Project Structure
-
-```
-custom_components/
-  comelit_intercom_local/
-    __init__.py          # HA integration setup
-    config_flow.py       # UI setup with auto token extraction
-    coordinator.py       # DataUpdateCoordinator
-    button.py            # Door open buttons
-    camera.py            # RTSP camera entities
-    event.py             # Doorbell ring events
-    protocol.py          # Wire protocol: headers, message types, binary payloads
-    channels.py          # Channel definitions (UAUT, UCFG, CTPP, PUSH)
-    client.py            # AsyncIO TCP client
-    auth.py              # Authentication flow
-    token.py             # Token extraction from device HTTP backup
-    config_reader.py     # Device configuration retrieval
-    door.py              # Door open sequence
-    push.py              # Push notification listener
-    camera_utils.py      # RTSP URL discovery
-    models.py            # Data models (Door, Camera, DeviceConfig, PushEvent)
-    exceptions.py        # Custom exceptions
-
-tests/                   # Unit and integration tests
-```
-
-## Testing
-
-```bash
-# Unit tests (no device needed)
-PYTHONPATH=. pytest tests/test_protocol.py tests/test_client.py -v
-
-# Integration tests (real device)
-COMELIT_HOST=192.168.31.XX COMELIT_TOKEN=<token> \
-  pytest tests/test_integration.py -v -s
-
-# Test door opening (actually opens a door!)
-COMELIT_HOST=192.168.1.XX COMELIT_TOKEN=<token> COMELIT_TEST_DOOR=1 \
-  pytest tests/test_integration.py::test_open_door -v -s
-
-# Listen for doorbell events (30 seconds)
-COMELIT_HOST=192.168.1.XX COMELIT_TOKEN=<token> COMELIT_TEST_PUSH=1 \
-  pytest tests/test_integration.py::test_push_listener -v -s
-```
-
 ## Protocol
 
 The ICONA Bridge protocol runs over raw TCP on port 64100. Every message has an 8-byte header:
@@ -118,6 +72,11 @@ Key operations:
 - **Configuration**: Open UCFG channel → request config → parse doors, cameras, addresses
 - **Door open**: Open CTPP channel → 6-step binary sequence (init → open+confirm → door init → open+confirm)
 - **Push notifications**: Open PUSH channel → receive unsolicited JSON on doorbell ring
+
+## Future developments
+
+- **Doorbell notifications** — real-time push events when someone rings
+- **Voice implementation** - get sound from video door phone
 
 ## Acknowledgments
 
