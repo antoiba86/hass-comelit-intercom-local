@@ -90,8 +90,8 @@ class ComelitIntercomCamera(Camera):
     _attr_has_entity_name = True
     _attr_name = "Intercom Video"
     _attr_icon = "mdi:doorbell-video"
-    # No ON_OFF feature — is_on must stay True so HA serves images/MJPEG.
-    # Manual start/stop is handled by the separate button entities.
+    # No ON_OFF feature — base Camera.is_on defaults to True, which is what
+    # we want. Manual start/stop is handled by the separate button entities.
 
     def __init__(
         self,
@@ -115,11 +115,6 @@ class ComelitIntercomCamera(Camera):
             model=MODEL,
             name="Comelit Intercom",
         )
-
-    @property
-    def is_on(self) -> bool:
-        """Always True — HA blocks image/stream requests when False."""
-        return True
 
     @property
     def _video_active(self) -> bool:

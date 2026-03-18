@@ -150,8 +150,12 @@ sys.modules["homeassistant.core"] = _ha.core
 sys.modules["homeassistant.exceptions"] = _ha_exceptions
 sys.modules["homeassistant.helpers"] = _ha_helpers
 sys.modules["homeassistant.helpers.update_coordinator"] = _ha_update_coordinator
+_ha_helpers_entity = MagicMock()
+_ha_helpers_entity.DeviceInfo = dict  # DeviceInfo is dict-like
+
 sys.modules["homeassistant.components"] = MagicMock()
 sys.modules["homeassistant.components.camera"] = _ha_camera
+sys.modules["homeassistant.helpers.entity"] = _ha_helpers_entity
 sys.modules["homeassistant.helpers.entity_platform"] = _ha_entity_platform
 
 import pytest

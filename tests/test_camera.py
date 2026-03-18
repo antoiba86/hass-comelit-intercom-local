@@ -197,10 +197,3 @@ async def test_start_video_default_auto_timeout(camera):
     )
 
 
-def test_is_on_always_true(camera):
-    """is_on always returns True so HA serves images and streams unconditionally."""
-    assert camera.is_on is True
-
-    # Even with no active session
-    camera._coordinator.video_session = None
-    assert camera.is_on is True
