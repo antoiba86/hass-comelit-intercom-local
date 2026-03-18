@@ -62,11 +62,13 @@ class VideoCallSession:
         port: int,
         token: str,
         config: DeviceConfig,
+        auto_timeout: bool = True,
     ) -> None:
         self._host = host
         self._port = port
         self._token = token
         self._config = config
+        self._auto_timeout = auto_timeout
         self._client: IconaBridgeClient | None = None
         self._rtp_receiver: RtpReceiver | None = None
         self._timeout_task: asyncio.Task | None = None
@@ -399,8 +401,9 @@ class VideoCallSession:
                 control_req_id, media_req_id, udpm_token,
             )
 
-            # Step 11: Auto-timeout
-            self._timeout_task = asyncio.create_task(self._auto_timeout())
+            # Step 11: Auto-timeout (skipped when stream handles lifecycle)
+            if self._auto_timeout:
+                self._timeout_task = asyncio.create_task(self._auto_timeout_loop())
 
             _LOGGER.info(
                 "Video call session started: our_addr=%s entrance=%s",
@@ -469,7 +472,7 @@ class VideoCallSession:
         except Exception:
             _LOGGER.debug("TCP video loop error", exc_info=True)
 
-    async def _auto_timeout(self) -> None:
+    async def _auto_timeout_loop(self) -> None:
         """Automatically stop the session after VIDEO_SESSION_TIMEOUT."""
         try:
             await asyncio.sleep(VIDEO_SESSION_TIMEOUT)

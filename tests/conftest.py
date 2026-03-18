@@ -112,6 +112,36 @@ _ha.exceptions = _ha_exceptions
 _ha.helpers = _ha_helpers
 _ha_helpers.update_coordinator = _ha_update_coordinator
 
+# Stub for homeassistant.components.camera
+_ha_camera = MagicMock()
+
+
+class _CameraEntityFeature:
+    STREAM = 1
+    ON_OFF = 2
+
+
+class _Camera:
+    """Minimal stub for homeassistant.components.camera.Camera."""
+
+    _attr_has_entity_name = False
+    _attr_name = None
+    _attr_unique_id = None
+    _attr_icon = None
+    _attr_supported_features = 0
+
+    def __init__(self):
+        pass
+
+    def async_write_ha_state(self):
+        pass
+
+
+_ha_camera.Camera = _Camera
+_ha_camera.CameraEntityFeature = _CameraEntityFeature
+
+_ha_entity_platform = MagicMock()
+
 # Register all modules in sys.modules
 sys.modules["homeassistant"] = _ha
 sys.modules["homeassistant.config_entries"] = _ha_config_entries
@@ -120,6 +150,9 @@ sys.modules["homeassistant.core"] = _ha.core
 sys.modules["homeassistant.exceptions"] = _ha_exceptions
 sys.modules["homeassistant.helpers"] = _ha_helpers
 sys.modules["homeassistant.helpers.update_coordinator"] = _ha_update_coordinator
+sys.modules["homeassistant.components"] = MagicMock()
+sys.modules["homeassistant.components.camera"] = _ha_camera
+sys.modules["homeassistant.helpers.entity_platform"] = _ha_entity_platform
 
 import pytest
 
