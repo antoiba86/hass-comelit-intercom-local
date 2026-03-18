@@ -6,8 +6,10 @@ import logging
 
 from homeassistant.components.event import EventEntity
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
+from .const import DOMAIN, MANUFACTURER, MODEL
 from .coordinator import ComelitLocalConfigEntry, ComelitLocalCoordinator
 from .models import PushEvent
 
@@ -41,7 +43,18 @@ class ComelitDoorbellEvent(EventEntity):
     ) -> None:
         """Initialize the doorbell event entity."""
         self._coordinator = coordinator
+        self._entry_id = entry_id
         self._attr_unique_id = f"{entry_id}_doorbell"
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        """Return device info linking this event to the main intercom device."""
+        return DeviceInfo(
+            identifiers={(DOMAIN, self._entry_id)},
+            manufacturer=MANUFACTURER,
+            model=MODEL,
+            name="Comelit Intercom",
+        )
 
     async def async_added_to_hass(self) -> None:
         """Register push callback when added to HA."""

@@ -10,9 +10,11 @@ from aiohttp import web
 
 from homeassistant.components.camera import Camera, CameraEntityFeature
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .camera_utils import get_rtsp_url
+from .const import DOMAIN, MANUFACTURER, MODEL
 from .coordinator import ComelitLocalConfigEntry, ComelitLocalCoordinator
 from .models import Camera as CameraModel, PushEvent
 from .placeholder import PLACEHOLDER_JPEG
@@ -62,8 +64,19 @@ class ComelitCamera(Camera):
         super().__init__()
         self._coordinator = coordinator
         self._camera = camera
+        self._entry_id = entry_id
         self._attr_unique_id = f"{entry_id}_camera_{camera.id}"
         self._attr_name = camera.name
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        """Return device info linking this camera to its own device."""
+        return DeviceInfo(
+            identifiers={(DOMAIN, f"{self._entry_id}_camera_{self._camera.id}")},
+            manufacturer=MANUFACTURER,
+            name=self._camera.name,
+            via_device=(DOMAIN, self._entry_id),
+        )
 
     async def stream_source(self) -> str | None:
         """Return the RTSP stream URL for HA's stream integration."""
@@ -88,9 +101,20 @@ class ComelitIntercomCamera(Camera):
         """Initialize the intercom camera entity."""
         super().__init__()
         self._coordinator = coordinator
+        self._entry_id = entry_id
         self._attr_unique_id = f"{entry_id}_intercom_camera"
         self._remove_push_cb: Callable[[], None] | None = None
         self._viewer_count: int = 0
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        """Return device info linking this camera to the main intercom device."""
+        return DeviceInfo(
+            identifiers={(DOMAIN, self._entry_id)},
+            manufacturer=MANUFACTURER,
+            model=MODEL,
+            name="Comelit Intercom",
+        )
 
     @property
     def is_on(self) -> bool:
