@@ -284,6 +284,23 @@ class RtpReceiver:
         h264_buffer = bytearray()
         frame_count = 0
         consecutive_errors = 0
+        loop = asyncio.get_running_loop()
+
+        def _decode_buffer_sync(buf: bytes) -> list[tuple[int, int, bytes]]:
+            """Parse + decode + JPEG-encode a buffer. Runs in thread pool.
+
+            Returns list of (width, height, jpeg_bytes) tuples — one per
+            decoded frame. Runs blocking C calls off the event loop so the
+            asyncio slow-task detector is not triggered.
+            """
+            results = []
+            packets = codec.parse(buf)
+            for packet in packets:
+                for frame in codec.decode(packet):
+                    jpeg = RtpReceiver._frame_to_jpeg(frame)
+                    if jpeg:
+                        results.append((frame.width, frame.height, jpeg))
+            return results
 
         try:
             while self._running:
@@ -296,34 +313,28 @@ class RtpReceiver:
 
                 h264_buffer.extend(nal)
 
-                # Feed accumulated H.264 data to decoder periodically
-                # (after each complete NAL, or when buffer is large enough)
                 if len(h264_buffer) > 0:
+                    buf_snapshot = bytes(h264_buffer)
+                    h264_buffer.clear()
                     try:
-                        packets = codec.parse(bytes(h264_buffer))
-                        h264_buffer.clear()
-                        for packet in packets:
-                            frames = codec.decode(packet)
-                            for frame in frames:
-                                frame_count += 1
-                                jpeg_data = self._frame_to_jpeg(frame)
-                                if jpeg_data:
-                                    self._latest_frame = jpeg_data
-                                    self._frame_event.set()
-                                    if frame_count <= 3:
-                                        _LOGGER.debug(
-                                            "Decoded frame %d: %dx%d (%d bytes JPEG)",
-                                            frame_count, frame.width, frame.height,
-                                            len(jpeg_data),
-                                        )
+                        decoded = await loop.run_in_executor(
+                            None, _decode_buffer_sync, buf_snapshot
+                        )
+                        for w, h, jpeg_data in decoded:
+                            frame_count += 1
+                            self._latest_frame = jpeg_data
+                            self._frame_event.set()
+                            if frame_count <= 3:
+                                _LOGGER.debug(
+                                    "Decoded frame %d: %dx%d (%d bytes JPEG)",
+                                    frame_count, w, h, len(jpeg_data),
+                                )
                         consecutive_errors = 0
                     except av.error.InvalidDataError:
                         _LOGGER.debug("Invalid H.264 data, skipping")
-                        h264_buffer.clear()
                         consecutive_errors = 0
                     except Exception:
                         _LOGGER.debug("Decode error", exc_info=True)
-                        h264_buffer.clear()
                         consecutive_errors += 1
                         if consecutive_errors >= _MAX_CONSECUTIVE_ERRORS:
                             _LOGGER.error(

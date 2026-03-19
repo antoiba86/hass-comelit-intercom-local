@@ -205,8 +205,12 @@ class VideoCallSession:
                 udpm_token=udpm_token,
             )
             # Open UDP socket + send 2 discovery packets so the device knows
-            # our UDP port before video config. Keepalive loop starts later.
+            # our UDP port before video config. Start keepalive immediately so
+            # the device doesn't time out during the codec exchange / RTPC setup
+            # (which can take 10+ seconds). The PCAP shows keepalives sent
+            # throughout the entire session, not just after video starts.
             await receiver.start_control()
+            receiver.start_keepalive()
             self._rtp_receiver = receiver
 
             # Step 5: Wait for device ACK of call init, then send codec msg
@@ -381,8 +385,8 @@ class VideoCallSession:
                 "Sent video config, our_counter=0x%08X", call_counter
             )
 
-            # Step 10: Start keepalive loop, set media req_id, start decoder.
-            receiver.start_keepalive()
+            # Step 10: Set media req_id and start decoder.
+            # (keepalive already started after start_control)
             receiver.set_media_req_id(media_req_id)
             await receiver.start_media()
 

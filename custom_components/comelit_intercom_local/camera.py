@@ -155,7 +155,6 @@ class ComelitIntercomCamera(Camera):
         await response.prepare(request)
 
         self._viewer_count += 1
-        started_by_us = False
         try:
             # Send placeholder immediately so user sees an image during handshake
             await self._write_mjpeg_frame(response, PLACEHOLDER_JPEG)
@@ -163,7 +162,6 @@ class ComelitIntercomCamera(Camera):
             # Start video if not already active (no auto-timeout — stream close handles it)
             if not self._video_active:
                 await self._start_video(auto_timeout=False)
-                started_by_us = True
 
             # Frame delivery loop
             while self._video_active:
@@ -185,7 +183,7 @@ class ComelitIntercomCamera(Camera):
             pass
         finally:
             self._viewer_count -= 1
-            if self._viewer_count <= 0 and started_by_us:
+            if self._viewer_count <= 0:
                 self._viewer_count = 0
                 await self._coordinator.async_stop_video()
         return response
