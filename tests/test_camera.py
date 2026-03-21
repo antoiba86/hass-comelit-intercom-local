@@ -118,10 +118,13 @@ def test_initial_viewer_count_is_zero(camera):
 async def test_mjpeg_stream_sends_placeholder_and_starts_video(camera):
     """handle_async_mjpeg_stream sends placeholder, starts video, stops on close.
 
-    New loop structure: while viewer_count > 0, one frame per iteration.
-    Exit via ConnectionResetError on write (simulates client disconnect).
+    Loop structure: while streaming, `continue` is always hit after the start
+    block, so frame delivery happens in the *next* iteration after starting.
+    Exit via ConnectionError on write (simulates client disconnect).
     """
     camera._coordinator.async_stop_video = AsyncMock()
+    # New check: must be False or the loop will show placeholder instead of starting
+    camera._coordinator.video_stopped_by_user = False
 
     session = MagicMock()
     session.active = False
@@ -137,10 +140,10 @@ async def test_mjpeg_stream_sends_placeholder_and_starts_video(camera):
 
     camera._coordinator.async_start_video = mock_start_video
 
-    # _video_active sequence (one iteration of the new while-viewer_count loop):
-    #   check A (if not _video_active): False → triggers start_video
-    #   check B (if not _video_active after start): True → skip retry
-    # Frame is then written → ConnectionResetError breaks the loop.
+    # _video_active sequence:
+    #   loop 1, check A: False → not active → start_video
+    #   loop 1, check B: True → start succeeded → session_started=True → continue
+    #   loop 2, check A: True (fallback) → active → deliver frame → write → raise
     active_sequence = [False, True]
     active_idx = 0
 
@@ -161,7 +164,8 @@ async def test_mjpeg_stream_sends_placeholder_and_starts_video(camera):
         nonlocal write_count
         write_count += 1
         written_data.append(data)
-        # Raise on the 2nd write (the frame write) to exit the loop
+        # write #1 = initial placeholder (before loop)
+        # write #2 = frame in loop iteration 2 → raise to exit
         if write_count >= 2:
             raise ConnectionResetError
 
@@ -176,11 +180,51 @@ async def test_mjpeg_stream_sends_placeholder_and_starts_video(camera):
     assert PLACEHOLDER_JPEG in written_data[0]
     assert _MJPEG_BOUNDARY.encode() in written_data[0]
 
-    # Live frame was delivered in the loop iteration
+    # Live frame was delivered in the loop
     assert any(fake_frame in d for d in written_data[1:])
 
     # Video was stopped when viewer_count reached 0
     camera._coordinator.async_stop_video.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_mjpeg_stream_pauses_when_user_stopped_video(camera):
+    """When video_stopped_by_user is True, stream writes placeholder instead of starting."""
+    camera._coordinator.async_stop_video = AsyncMock()
+    camera._coordinator.async_start_video = AsyncMock()
+    camera._coordinator.video_stopped_by_user = True
+
+    camera._coordinator.video_session = None  # no active session
+
+    request = MagicMock()
+    written_data = []
+    write_count = 0
+
+    response = MagicMock()
+    response.prepare = AsyncMock()
+
+    async def capture_write(data):
+        nonlocal write_count
+        write_count += 1
+        written_data.append(data)
+        if write_count >= 2:
+            raise ConnectionResetError
+
+    response.write = capture_write
+
+    # _video_active always False (no session)
+    def mock_video_active(self):
+        return False
+
+    with patch("aiohttp.web.StreamResponse", return_value=response):
+        with patch.object(type(camera), "_video_active", new_callable=lambda: property(mock_video_active)):
+            with patch("asyncio.sleep", new_callable=AsyncMock):
+                await camera.handle_async_mjpeg_stream(request)
+
+    # start_video must NOT have been called
+    camera._coordinator.async_start_video.assert_not_called()
+    # Placeholder was written (at least twice — initial + loop iteration)
+    assert all(PLACEHOLDER_JPEG in d for d in written_data)
 
 
 @pytest.mark.asyncio

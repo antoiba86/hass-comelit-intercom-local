@@ -160,17 +160,29 @@ class ComelitIntercomCamera(Camera):
         await response.prepare(request)
 
         self._viewer_count += 1
+        streaming = True
         try:
             await self._write_mjpeg_frame(response, PLACEHOLDER_JPEG)
 
-            while self._viewer_count > 0:
-                # No active session — start (or restart) one
+            session_started = False
+            while streaming:
                 if not self._video_active:
+                    # User explicitly stopped — show placeholder and wait
+                    if self._coordinator.video_stopped_by_user:
+                        await self._write_mjpeg_frame(response, PLACEHOLDER_JPEG)
+                        await asyncio.sleep(1.0)
+                        continue
+
+                    # Start or restart video
+                    if session_started:
+                        _LOGGER.info("MJPEG: session stopped, restarting")
                     await self._start_video(auto_timeout=False)
                     if not self._video_active:
                         await self._write_mjpeg_frame(response, PLACEHOLDER_JPEG)
                         await asyncio.sleep(5.0)
-                        continue
+                    else:
+                        session_started = True
+                    continue
 
                 # Deliver one frame (blocks up to 0.5s)
                 session = self._coordinator.video_session
@@ -188,13 +200,10 @@ class ComelitIntercomCamera(Camera):
                 else:
                     await asyncio.sleep(0.5)
 
-                # Session just died — log it; next iteration restarts
-                if not self._video_active:
-                    _LOGGER.info("MJPEG: video session stopped, will restart")
-
-        except (ConnectionResetError, asyncio.CancelledError):
+        except (ConnectionError, asyncio.CancelledError):
             pass
         finally:
+            streaming = False
             self._viewer_count -= 1
             if self._viewer_count <= 0:
                 self._viewer_count = 0

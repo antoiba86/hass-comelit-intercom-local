@@ -437,32 +437,25 @@ class VideoCallSession:
 
     async def stop(self) -> None:
         """Stop the video session and clean up."""
-        if not self._active:
-            return
         _LOGGER.info("Stopping video call session")
         await self._cleanup()
 
     async def _cleanup(self) -> None:
-        """Clean up all resources."""
+        """Clean up all resources.
+
+        Tasks are cancelled with a 2s timeout on each await. Without the
+        timeout, awaiting a cancelled task stuck on a dead TCP connection can
+        freeze the event loop for 30-40s (observed on Python 3.14/aarch64).
+        """
         self._active = False
 
-        timeout_task, self._timeout_task = self._timeout_task, None
-        if timeout_task:
-            timeout_task.cancel()
-            with contextlib.suppress(BaseException):
-                await timeout_task
-
-        tcp_task, self._tcp_task = self._tcp_task, None
-        if tcp_task:
-            tcp_task.cancel()
-            with contextlib.suppress(BaseException):
-                await tcp_task
-
-        ctpp_task, self._ctpp_task = self._ctpp_task, None
-        if ctpp_task:
-            ctpp_task.cancel()
-            with contextlib.suppress(BaseException):
-                await ctpp_task
+        for task_attr in ("_timeout_task", "_tcp_task", "_ctpp_task"):
+            task = getattr(self, task_attr)
+            setattr(self, task_attr, None)
+            if task and not task.done():
+                task.cancel()
+                with contextlib.suppress(BaseException):
+                    await asyncio.wait([task], timeout=2.0)
 
         receiver, self._rtp_receiver = self._rtp_receiver, None
         if receiver:

@@ -149,6 +149,7 @@ class ComelitStopVideoButton(CoordinatorEntity[ComelitLocalCoordinator], ButtonE
         """Stop intercom video when pressed."""
         _LOGGER.info("Stopping intercom video")
         try:
+            self.coordinator.request_video_stop()
             await self.coordinator.async_stop_video()
         except Exception:
             _LOGGER.exception("Failed to stop intercom video")

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 import contextlib
 from datetime import timedelta
@@ -15,7 +16,7 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 from .auth import authenticate
 from .client import IconaBridgeClient
 from .config_reader import get_device_config
-from .const import DOMAIN
+from .const import DOMAIN, PREWARM_DELAY_SECONDS
 from .door import open_door
 from .models import DeviceConfig, Door, PushEvent
 from .push import register_push
@@ -51,6 +52,8 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
         self._client: IconaBridgeClient | None = None
         self._config: DeviceConfig | None = None
         self._video_session: VideoCallSession | None = None
+        self._video_stopped_by_user: bool = False
+        self._prewarm_task: asyncio.Task[None] | None = None
         # Use an insertion-ordered dict to track callbacks (value is always None).
         # This avoids ValueError on removal and preserves iteration order.
         self._push_callbacks: dict[Callable[[PushEvent], None], None] = {}
@@ -108,6 +111,7 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
 
     async def async_shutdown(self) -> None:
         """Disconnect from the device."""
+        self._cancel_prewarm()
         await self.async_stop_video()
         if self._client:
             await self._client.disconnect()
@@ -141,21 +145,118 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
     async def async_start_video(
         self, auto_timeout: bool = True
     ) -> VideoCallSession:
-        """Start a video call session using a fresh connection."""
+        """Start a video call session."""
         if not self._config:
             raise RuntimeError("Not configured")
-        # Stop any existing session first
-        await self.async_stop_video()
+
+        self._video_stopped_by_user = False
+
+        await self.async_stop_video()  # Also cancels prewarm
+
         session = VideoCallSession(
             self.host, self.port, self.token, self._config,
             auto_timeout=auto_timeout,
         )
         await session.start()
         self._video_session = session
+
+        # For long-running MJPEG streams (auto_timeout=False), schedule a
+        # pre-warm at t=25s so the next session is ready before CALL_END arrives
+        # (~30s). Establishment takes ~1.3s, leaving ~3.7s buffer.
+        if not auto_timeout:
+            self._prewarm_task = asyncio.create_task(self._prewarm_loop())
+
         return session
+
+    def _cancel_prewarm(self) -> None:
+        """Cancel the pre-warm task without awaiting it.
+
+        Not awaiting is intentional: awaiting a mid-establishment task blocks
+        for 14-18s while the TCP handshake times out. We fire cancel() and let
+        the task handle its own cleanup asynchronously.
+        """
+        task, self._prewarm_task = self._prewarm_task, None
+        if task and not task.done():
+            task.cancel()
+
+    def _stop_session_in_background(
+        self, session: VideoCallSession, label: str
+    ) -> None:
+        """Schedule a session stop in the background without blocking."""
+        async def _stop() -> None:
+            try:
+                await session.stop()
+            except Exception:
+                _LOGGER.debug("Error stopping %s session", label, exc_info=True)
+
+        asyncio.get_running_loop().create_task(_stop())
+
+    async def _prewarm_loop(self) -> None:
+        """Establish the next session at t=25s, then swap it in atomically."""
+        try:
+            await asyncio.sleep(PREWARM_DELAY_SECONDS)
+        except asyncio.CancelledError:
+            return  # Cancelled during sleep — nothing to clean up.
+
+        if self._video_stopped_by_user or not self._config:
+            return
+
+        _LOGGER.info("Pre-warming next video session")
+        new_session = VideoCallSession(
+            self.host, self.port, self.token, self._config,
+            auto_timeout=False,
+        )
+        try:
+            await new_session.start()
+        except asyncio.CancelledError:
+            self._stop_session_in_background(new_session, "cancelled pre-warm")
+            return
+        except Exception:
+            _LOGGER.warning(
+                "Pre-warm failed — will restart on CALL_END instead",
+                exc_info=True,
+            )
+            return
+
+        if self._video_stopped_by_user:
+            # User stopped video while we were establishing — discard new session.
+            await new_session.stop()
+            return
+
+        # Wait for the new receiver to produce at least one frame before
+        # swapping, so camera.py never shows a placeholder during the switch.
+        new_receiver = new_session.rtp_receiver
+        if new_receiver:
+            first_frame = await new_receiver.get_jpeg_frame(timeout=3.0)
+            if not first_frame:
+                _LOGGER.warning("Pre-warm: new session produced no frames in 3s")
+
+        if self._video_stopped_by_user:
+            await new_session.stop()
+            return
+
+        # Atomic swap: camera.py will pick up the new session on its next frame.
+        old_session, self._video_session = self._video_session, new_session
+        _LOGGER.info("Switched to pre-warmed session seamlessly")
+
+        if old_session:
+            self._stop_session_in_background(old_session, "old")
+
+        # Schedule the next pre-warm for the new session (infinite cycling).
+        self._prewarm_task = asyncio.create_task(self._prewarm_loop())
+
+    @property
+    def video_stopped_by_user(self) -> bool:
+        """Return True if the user explicitly stopped video (not CALL_END)."""
+        return self._video_stopped_by_user
+
+    def request_video_stop(self) -> None:
+        """Mark that the user explicitly requested video to stop."""
+        self._video_stopped_by_user = True
 
     async def async_stop_video(self) -> None:
         """Stop the active video call session."""
+        self._cancel_prewarm()
         if self._video_session:
             await self._video_session.stop()
             self._video_session = None

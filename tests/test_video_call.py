@@ -121,6 +121,19 @@ class TestCleanup:
         await session._cleanup()
         await session._cleanup()  # should not raise
 
+    @pytest.mark.asyncio
+    async def test_stop_callable_when_inactive(self):
+        """stop() must not raise even when the session was never active."""
+        session = VideoCallSession.__new__(VideoCallSession)
+        session._active = False
+        session._timeout_task = None
+        session._tcp_task = None
+        session._ctpp_task = None
+        session._rtp_receiver = None
+        session._client = None
+
+        await session.stop()  # should not raise
+
 
 class TestCtppMonitorLoop:
     """Tests for the CTPP monitor loop that ACKs device messages during a call."""

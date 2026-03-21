@@ -363,20 +363,50 @@ class TestQueueNal:
 
 class TestGetJpegFrame:
     @pytest.mark.asyncio
-    async def test_returns_existing_frame_immediately(self):
-        """Returns _latest_frame immediately if already available."""
+    async def test_returns_cached_frame_on_timeout(self):
+        """On timeout, returns the last decoded frame (not None) if one exists.
+
+        New behaviour: get_jpeg_frame always waits for the next event. If the
+        event doesn't fire within the timeout the caller still gets whatever
+        was decoded previously so it has something to display.
+        """
         receiver = RtpReceiver("127.0.0.1")
-        fake_jpeg = b"\xff\xd8fake\xff\xd9"
+        fake_jpeg = b"\xff\xd8cached\xff\xd9"
         receiver._latest_frame = fake_jpeg
-        result = await receiver.get_jpeg_frame(timeout=0.1)
+        result = await receiver.get_jpeg_frame(timeout=0.05)
         assert result is fake_jpeg
 
     @pytest.mark.asyncio
-    async def test_returns_none_on_timeout(self):
-        """Returns None when no frame arrives within timeout."""
+    async def test_returns_none_on_timeout_with_no_frame(self):
+        """Returns None on timeout when no frame has ever been decoded."""
         receiver = RtpReceiver("127.0.0.1")
         result = await receiver.get_jpeg_frame(timeout=0.05)
         assert result is None
+
+    @pytest.mark.asyncio
+    async def test_always_waits_for_next_event(self):
+        """Never returns a cached frame immediately — always waits for the event.
+
+        This prevents camera.py from spinning in a tight loop that floods the
+        TCP send buffer (~16fps natural throttling via the frame event).
+        """
+        receiver = RtpReceiver("127.0.0.1")
+        # Pre-load a cached frame AND pre-set the event
+        receiver._latest_frame = b"\xff\xd8old\xff\xd9"
+        receiver._frame_event.set()
+
+        # New frame arrives after a small delay
+        new_jpeg = b"\xff\xd8new\xff\xd9"
+
+        async def produce():
+            await asyncio.sleep(0.02)
+            receiver._latest_frame = new_jpeg
+            receiver._frame_event.set()
+
+        asyncio.create_task(produce())
+        result = await receiver.get_jpeg_frame(timeout=1.0)
+        # get_jpeg_frame clears the event first, so it must wait for produce()
+        assert result is new_jpeg
 
     @pytest.mark.asyncio
     async def test_waits_for_frame_event(self):
@@ -509,70 +539,49 @@ class TestKeepaliveLoop:
 
 
 class TestFrameToJpeg:
-    def _make_fake_av_with_frame(self):
-        """Build a fake av module that encodes a frame to minimal JPEG bytes."""
-        fake_av = ModuleType("av")
+    """Tests for _frame_to_jpeg which now uses Pillow (frame.to_image()) not PyAV MJPEG."""
 
-        fake_jpeg = b"\xff\xd8\xff\xe0fake_jpeg\xff\xd9"
+    def _make_fake_frame(self, jpeg_bytes: bytes = b"\xff\xd8\xff\xe0fake\xff\xd9"):
+        """Build a frame mock whose to_image() returns a Pillow-like image."""
+        _jpeg = jpeg_bytes
 
-        class FakePacket:
-            def __bytes__(self):
-                return fake_jpeg
-
-        class FakeEncoder:
-            def __init__(self):
-                self.width = 0
-                self.height = 0
-                self.pix_fmt = ""
-                self.time_base = None
-
-            def encode(self, frame):
-                if frame is None:
-                    return []
-                return [FakePacket()]
-
-        fake_av.CodecContext = MagicMock()
-        fake_av.CodecContext.create = lambda codec, mode: FakeEncoder()
-
-        class FakeFormat:
-            name = "yuv420p"
+        class FakeImage:
+            def save(self, buf, format="JPEG", quality=80):
+                buf.write(_jpeg)
 
         class FakeFrame:
             width = 320
             height = 240
-            format = FakeFormat()
-            time_base = None
 
-            def reformat(self, format):
-                f = FakeFrame()
-                f.format = type("fmt", (), {"name": format})()
-                return f
+            def to_image(self):
+                return FakeImage()
 
-        return fake_av, FakeFrame()
+        return FakeFrame(), _jpeg
 
     def test_frame_to_jpeg_success(self):
-        """_frame_to_jpeg returns JPEG bytes on success."""
-        fake_av, fake_frame = self._make_fake_av_with_frame()
+        """_frame_to_jpeg returns JPEG bytes produced by Pillow's image.save()."""
+        fake_frame, expected_jpeg = self._make_fake_frame()
+        result = RtpReceiver._frame_to_jpeg(fake_frame)
+        assert result == expected_jpeg
 
-        with patch.dict(sys.modules, {"av": fake_av}):
-            result = RtpReceiver._frame_to_jpeg(fake_frame)
-
-        assert result is not None
-        assert len(result) > 0
-
-    def test_frame_to_jpeg_returns_none_on_exception(self):
-        """_frame_to_jpeg returns None when encoding raises."""
-        fake_av = ModuleType("av")
-        fake_av.CodecContext = MagicMock()
-        fake_av.CodecContext.create = MagicMock(side_effect=RuntimeError("boom"))
+    def test_frame_to_jpeg_returns_none_when_save_writes_nothing(self):
+        """_frame_to_jpeg returns None when image.save() writes zero bytes."""
+        class EmptyImage:
+            def save(self, buf, **kwargs):
+                pass  # write nothing
 
         class FakeFrame:
-            width = 320
-            height = 240
-            format = type("fmt", (), {"name": "yuv420p"})()
-            time_base = None
+            def to_image(self):
+                return EmptyImage()
 
-        with patch.dict(sys.modules, {"av": fake_av}):
-            result = RtpReceiver._frame_to_jpeg(FakeFrame())
+        result = RtpReceiver._frame_to_jpeg(FakeFrame())
+        assert result is None
 
+    def test_frame_to_jpeg_returns_none_on_exception(self):
+        """_frame_to_jpeg returns None when to_image() raises."""
+        class BrokenFrame:
+            def to_image(self):
+                raise RuntimeError("boom")
+
+        result = RtpReceiver._frame_to_jpeg(BrokenFrame())
         assert result is None

@@ -270,9 +270,21 @@ class RtpReceiver:
             pass  # Drop oldest data if decoder can't keep up
 
     async def _decode_loop(self) -> None:
-        """Background task: decode H.264 NAL units to JPEG frames via PyAV."""
-        try:
+        """Background task: decode H.264 NAL units to JPEG frames via PyAV.
+
+        PyAV import and codec creation are offloaded to a thread pool because
+        loading the ffmpeg C library can block the event loop for 30-60s on
+        aarch64/Python 3.14 (observed in production).
+        """
+        loop = asyncio.get_running_loop()
+
+        def _init_codec():
+            """Import PyAV and create H.264 codec context (runs in thread)."""
             import av  # noqa: PLC0415
+            return av, av.CodecContext.create("h264", "r")
+
+        try:
+            av, codec = await loop.run_in_executor(None, _init_codec)
         except ImportError:
             _LOGGER.error(
                 "PyAV (av) not installed — cannot decode video. "
@@ -280,11 +292,11 @@ class RtpReceiver:
             )
             return
 
-        codec = av.CodecContext.create("h264", "r")
         h264_buffer = bytearray()
         frame_count = 0
         consecutive_errors = 0
-        loop = asyncio.get_running_loop()
+
+        verbose = _LOGGER.isEnabledFor(logging.DEBUG)
 
         def _decode_buffer_sync(buf: bytes) -> list[tuple[int, int, bytes]]:
             """Parse + decode + JPEG-encode a buffer. Runs in thread pool.
@@ -293,13 +305,26 @@ class RtpReceiver:
             decoded frame. Runs blocking C calls off the event loop so the
             asyncio slow-task detector is not triggered.
             """
+            import time as _time  # noqa: PLC0415
             results = []
+            t0 = _time.monotonic() if verbose else 0.0
             packets = codec.parse(buf)
+            t1 = _time.monotonic() if verbose else 0.0
             for packet in packets:
                 for frame in codec.decode(packet):
+                    t2 = _time.monotonic() if verbose else 0.0
                     jpeg = RtpReceiver._frame_to_jpeg(frame)
                     if jpeg:
                         results.append((frame.width, frame.height, jpeg))
+                        if verbose:
+                            _LOGGER.debug(
+                                "Decode timing: parse=%.3fs decode=%.3fs "
+                                "jpeg=%.3fs size=%d",
+                                t1 - t0,
+                                t2 - t1,
+                                _time.monotonic() - t2,
+                                len(jpeg),
+                            )
             return results
 
         try:
@@ -309,6 +334,11 @@ class RtpReceiver:
                         self._nal_queue.get(), timeout=2.0
                     )
                 except TimeoutError:
+                    if verbose and frame_count == 0:
+                        _LOGGER.debug(
+                            "Decode loop: no NALs yet (media_packets=%d)",
+                            self._media_packet_count,
+                        )
                     continue
 
                 h264_buffer.extend(nal)
@@ -324,10 +354,11 @@ class RtpReceiver:
                             frame_count += 1
                             self._latest_frame = jpeg_data
                             self._frame_event.set()
-                            if frame_count <= 3:
+                            if verbose and (frame_count <= 5 or frame_count % 50 == 0):
                                 _LOGGER.debug(
-                                    "Decoded frame %d: %dx%d (%d bytes JPEG)",
+                                    "Frame %d: %dx%d (%d bytes JPEG), queue=%d",
                                     frame_count, w, h, len(jpeg_data),
+                                    self._nal_queue.qsize(),
                                 )
                         consecutive_errors = 0
                     except av.error.InvalidDataError:
@@ -348,55 +379,46 @@ class RtpReceiver:
         except Exception:
             _LOGGER.debug("Decode loop error", exc_info=True)
 
-        _LOGGER.debug("Decode loop ended, decoded %d frames", frame_count)
+        _LOGGER.debug(
+            "Decode loop ended: %d frames decoded, %d media packets received",
+            frame_count, self._media_packet_count,
+        )
+
 
     @staticmethod
     def _frame_to_jpeg(frame) -> bytes | None:
-        """Convert a PyAV VideoFrame to JPEG bytes."""
+        """Convert a PyAV VideoFrame to JPEG bytes via Pillow.
+
+        Uses frame.to_image() (Pillow) instead of creating a new ffmpeg
+        MJPEG encoder context per frame. On aarch64, codec context creation
+        takes 30-60s, which meant only one frame could be decoded before
+        the device's 30s CALL_END timer killed the session.
+        """
         try:
-            import av  # noqa: PLC0415
-
             output = io.BytesIO()
-            # Encode frame as MJPEG
-            encoder = av.CodecContext.create("mjpeg", "w")
-            encoder.width = frame.width
-            encoder.height = frame.height
-            encoder.pix_fmt = "yuvj420p"
-            from fractions import Fraction
-            encoder.time_base = frame.time_base or Fraction(1, 25)
-
-            # Convert pixel format if needed
-            if frame.format.name != "yuvj420p":
-                frame = frame.reformat(format="yuvj420p")
-
-            packets = encoder.encode(frame)
-            for pkt in packets:
-                output.write(bytes(pkt))
-            # Flush
-            packets = encoder.encode(None)
-            for pkt in packets:
-                output.write(bytes(pkt))
-
+            image = frame.to_image()  # Returns PIL.Image (RGB)
+            image.save(output, format="JPEG", quality=80)
             return output.getvalue() if output.tell() > 0 else None
         except Exception:
             _LOGGER.debug("JPEG encode error", exc_info=True)
             return None
 
     async def stop(self) -> None:
-        """Stop receiving and clean up."""
+        """Stop receiving and clean up.
+
+        Cancelled tasks are awaited with a 2s timeout to allow orderly
+        shutdown without risking a 30-40s hang if a task is stuck in C
+        code (PyAV decode) or on a dead socket.
+        """
         self._running = False
 
-        if self._keepalive_task:
-            self._keepalive_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._keepalive_task
-            self._keepalive_task = None
-
-        if self._decode_task:
-            self._decode_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._decode_task
-            self._decode_task = None
+        for task_attr in ("_keepalive_task", "_decode_task"):
+            task = getattr(self, task_attr)
+            setattr(self, task_attr, None)
+            if task and not task.done():
+                task.cancel()
+                with contextlib.suppress(BaseException):
+                    await asyncio.wait([task], timeout=2.0)
 
         if self._transport:
             self._transport.close()
@@ -410,14 +432,21 @@ class RtpReceiver:
         )
 
     async def get_jpeg_frame(self, timeout: float = 5.0) -> bytes | None:
-        """Wait for and return the latest JPEG frame, or None on timeout."""
-        if self._latest_frame:
-            return self._latest_frame
+        """Wait for the next new JPEG frame and return it.
+
+        Always waits for the frame event — never returns a cached frame
+        immediately. This throttles callers to the device's native fps
+        (~16fps) and prevents them from spinning in a tight loop that
+        floods the TCP send buffer and causes 10-15s write stalls.
+
+        On timeout, returns the last decoded frame (or None if no frame
+        has ever been decoded) so callers always have something to show.
+        """
         self._frame_event.clear()
         try:
             await asyncio.wait_for(self._frame_event.wait(), timeout=timeout)
         except TimeoutError:
-            return None
+            pass
         return self._latest_frame
 
     @property

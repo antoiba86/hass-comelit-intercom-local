@@ -153,7 +153,35 @@ sys.modules["homeassistant.helpers.update_coordinator"] = _ha_update_coordinator
 _ha_helpers_entity = MagicMock()
 _ha_helpers_entity.DeviceInfo = dict  # DeviceInfo is dict-like
 
+class _ButtonEntity:
+    """Minimal stub for homeassistant.components.button.ButtonEntity."""
+
+    _attr_has_entity_name = False
+    _attr_name = None
+    _attr_unique_id = None
+
+    async def async_press(self) -> None:
+        pass
+
+
+_ha_button = MagicMock()
+_ha_button.ButtonEntity = _ButtonEntity
+
+
+class _CoordinatorEntity:
+    """Minimal stub for homeassistant.helpers.update_coordinator.CoordinatorEntity."""
+
+    def __class_getitem__(cls, item):
+        return cls
+
+    def __init__(self, coordinator, context=None):
+        self.coordinator = coordinator
+
+
+_ha_update_coordinator.CoordinatorEntity = _CoordinatorEntity
+
 sys.modules["homeassistant.components"] = MagicMock()
+sys.modules["homeassistant.components.button"] = _ha_button
 sys.modules["homeassistant.components.camera"] = _ha_camera
 sys.modules["homeassistant.helpers.entity"] = _ha_helpers_entity
 sys.modules["homeassistant.helpers.entity_platform"] = _ha_entity_platform

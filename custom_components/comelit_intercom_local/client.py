@@ -69,13 +69,17 @@ class IconaBridgeClient:
         _LOGGER.debug("Connected to %s:%s", self.host, self.port)
 
     async def disconnect(self) -> None:
-        """Close the TCP connection."""
+        """Close the TCP connection.
+
+        The receive task is cancelled with a 2s timeout to allow orderly
+        shutdown without risking a 30-40s hang on a dead socket.
+        """
         self._connected = False
         if self._receive_task:
-            self._receive_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await self._receive_task
-            self._receive_task = None
+            task, self._receive_task = self._receive_task, None
+            task.cancel()
+            with contextlib.suppress(BaseException):
+                await asyncio.wait([task], timeout=2.0)
         if self._writer:
             self._writer.close()
             with contextlib.suppress(OSError):
