@@ -147,7 +147,12 @@ class ComelitIntercomCamera(Camera):
     async def handle_async_mjpeg_stream(
         self, request: web.Request
     ) -> web.StreamResponse:
-        """Handle MJPEG stream — auto-starts video on open, stops on close."""
+        """Handle MJPEG stream — auto-starts video on open, stops on close.
+
+        When the video session stops unexpectedly (e.g. device sends CALL_END
+        and re-establishment fails), the session is automatically restarted so
+        the stream stays alive as long as the client is connected.
+        """
         response = web.StreamResponse()
         response.content_type = (
             f"multipart/x-mixed-replace;boundary={_MJPEG_BOUNDARY}"
@@ -156,19 +161,22 @@ class ComelitIntercomCamera(Camera):
 
         self._viewer_count += 1
         try:
-            # Send placeholder immediately so user sees an image during handshake
             await self._write_mjpeg_frame(response, PLACEHOLDER_JPEG)
 
-            # Start video if not already active (no auto-timeout — stream close handles it)
-            if not self._video_active:
-                await self._start_video(auto_timeout=False)
+            while self._viewer_count > 0:
+                # No active session — start (or restart) one
+                if not self._video_active:
+                    await self._start_video(auto_timeout=False)
+                    if not self._video_active:
+                        await self._write_mjpeg_frame(response, PLACEHOLDER_JPEG)
+                        await asyncio.sleep(5.0)
+                        continue
 
-            # Frame delivery loop
-            while self._video_active:
+                # Deliver one frame (blocks up to 0.5s)
                 session = self._coordinator.video_session
                 if session and session.rtp_receiver:
                     frame = await session.rtp_receiver.get_jpeg_frame(
-                        timeout=2.0
+                        timeout=0.5
                     )
                     if frame:
                         _LOGGER.debug(
@@ -179,6 +187,11 @@ class ComelitIntercomCamera(Camera):
                     )
                 else:
                     await asyncio.sleep(0.5)
+
+                # Session just died — log it; next iteration restarts
+                if not self._video_active:
+                    _LOGGER.info("MJPEG: video session stopped, will restart")
+
         except (ConnectionResetError, asyncio.CancelledError):
             pass
         finally:

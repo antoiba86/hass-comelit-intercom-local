@@ -15,6 +15,8 @@ from custom_components.comelit_intercom_local.protocol import (
     encode_header,
     encode_json_message,
     encode_open_door,
+    encode_rtpc_link,
+    encode_video_config_resp,
     is_json_body,
     parse_command_response,
 )
@@ -149,3 +151,38 @@ class TestDoorPayloads:
         assert with_ts[2:6] != legacy[2:6]
         # legacy payload must embed _CTPP_LEGACY_TS
         assert _CTPP_LEGACY_TS in legacy
+
+
+class TestVideoPayloads:
+    def test_encode_rtpc_link_normal_first_byte(self):
+        """encode_rtpc_link without refresh=True uses 0x18 as first extra byte."""
+        msg = encode_rtpc_link("SB0000061", "SB100001", 0x21B5, 0x12345678)
+        # extra starts at byte 8 (after prefix+timestamp+action+flags = 2+4+2+2)
+        # first byte of extra should be 0x18
+        assert bytes([0x18, 0x02]) in msg
+
+    def test_encode_rtpc_link_refresh_first_byte(self):
+        """encode_rtpc_link with refresh=True uses 0x98 as first extra byte."""
+        msg = encode_rtpc_link("SB0000061", "SB100001", 0x21B5, 0x12345678, refresh=True)
+        assert bytes([0x98, 0x02]) in msg
+        assert bytes([0x18, 0x02]) not in msg
+
+    def test_encode_video_config_resp_structure(self):
+        """encode_video_config_resp uses 0x1860 prefix and action 0x001A."""
+        msg = encode_video_config_resp("SB0000061", "SB100001", 0x21B6, 0x12345678)
+        prefix = struct.unpack_from("<H", msg, 0)[0]
+        assert prefix == 0x1860
+        action = struct.unpack_from(">H", msg, 6)[0]
+        assert action == 0x001A  # ACTION_VIDEO_CONFIG
+
+    def test_encode_video_config_resp_contains_rtpc2_id(self):
+        """encode_video_config_resp embeds rtpc2_req_id in the extra block."""
+        msg = encode_video_config_resp("SB0000061", "SB100001", 0xABCD, 0x12345678)
+        assert struct.pack("<H", 0xABCD) in msg
+
+    def test_encode_video_config_resp_no_resolution(self):
+        """encode_video_config_resp extra block has zeros only (no resolution/fps)."""
+        msg = encode_video_config_resp("SB0000061", "SB100001", 0x21B6, 0x12345678)
+        # Should NOT contain the 800x480 resolution from encode_video_config
+        assert struct.pack("<H", 800) not in msg
+        assert struct.pack("<H", 480) not in msg

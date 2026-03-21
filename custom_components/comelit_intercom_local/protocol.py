@@ -330,21 +330,54 @@ def encode_call_ack(caller: str, callee: str, timestamp: int) -> bytes:
 
 
 def encode_rtpc_link(
-    caller: str, callee: str, rtpc_req_id: int, timestamp: int
+    caller: str, callee: str, rtpc_req_id: int, timestamp: int, refresh: bool = False
 ) -> bytes:
     """Encode RTPC link message (4018 prefix, action 0x000A).
 
     Links an RTPC channel to the active call.
-    Extra: [0x18 0x02] [4 zeros] [rtpc_req_id LE16] [2 zeros]
+    Extra: [first_byte 0x02] [4 zeros] [rtpc_req_id LE16] [2 zeros]
+
+    When refresh=True (re-establishment after CALL_END), first_byte is 0x98
+    instead of 0x18 (bit 7 set, PCAP-verified).
     """
     extra = bytearray()
-    extra += bytes([0x18, 0x02, 0x00, 0x00, 0x00, 0x00])
+    extra += bytes([0x98 if refresh else 0x18, 0x02, 0x00, 0x00, 0x00, 0x00])
     extra += struct.pack("<H", rtpc_req_id)
     extra += bytes([0x00, 0x00])
     return _build_ctpp_video_msg(
         prefix=0x1840,
         timestamp=timestamp,
         action=ACTION_RTPC_LINK,
+        flags=0x0011,
+        caller=caller,
+        callee=callee,
+        extra=bytes(extra),
+    )
+
+
+def encode_video_config_resp(
+    caller: str,
+    callee: str,
+    rtpc2_req_id: int,
+    timestamp: int,
+) -> bytes:
+    """Encode video config response (6018 prefix, action 0x001A).
+
+    Sent after the CALL_END / RTPC_LINK re-establishment sequence to complete
+    the video session lock-in. Uses prefix 0x1860 and a stripped-down extra
+    block (zeros only, no resolution/fps fields).
+
+    Extra: [0x94 0x02] [4 zeros] [rtpc2_req_id LE16] [18 zeros]
+    (PCAP-verified from working Android session)
+    """
+    extra = bytearray()
+    extra += bytes([0x94, 0x02, 0x00, 0x00, 0x00, 0x00])
+    extra += struct.pack("<H", rtpc2_req_id)
+    extra += bytes(18)  # 18 trailing zeros (vs resolution+fps in original)
+    return _build_ctpp_video_msg(
+        prefix=0x1860,
+        timestamp=timestamp,
+        action=ACTION_VIDEO_CONFIG,
         flags=0x0011,
         caller=caller,
         callee=callee,

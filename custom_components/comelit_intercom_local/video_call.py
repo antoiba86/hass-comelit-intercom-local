@@ -73,6 +73,7 @@ class VideoCallSession:
         self._rtp_receiver: RtpReceiver | None = None
         self._timeout_task: asyncio.Task | None = None
         self._tcp_task: asyncio.Task | None = None
+        self._ctpp_task: asyncio.Task | None = None
         self._active = False
 
     @property
@@ -322,14 +323,27 @@ class VideoCallSession:
                 "Sent RTPC link, our_counter=0x%08X", call_counter
             )
 
-            # Step 9: Wait for device to open its own RTPC channel, then ACK
-            # its CTPP RTPC link message BEFORE sending video config.
-            # PCAP sequence after phone's RTPC link:
+            # Step 8b: Send video config IMMEDIATELY after RTPC link — BEFORE waiting
+            # for device RTPC. PCAP shows the Android app sends VIDEO_CONFIG as message
+            # #17 while device opens its own RTPC at #18. If we wait for device RTPC
+            # first, the device doesn't enter the correct state for HANGUP/ZERO recovery.
+            # PCAP: call_counter +0x00010000 (byte[4] +1) for video config DATA message.
+            call_counter += _CTR_INCR_BYTE4
+            vid_config = encode_video_config(
+                our_addr, entrance_addr, media_req_id, call_counter
+            )
+            await client.send_binary(ctpp, vid_config)
+            _LOGGER.debug(
+                "Sent video config (before device RTPC), our_counter=0x%08X", call_counter
+            )
+
+            # Step 9: Now wait for device to open its own RTPC channel, then ACK
+            # its CTPP RTPC link message.
+            # PCAP sequence after phone's RTPC link + video config:
             #   device CHAN_OPEN (RTPC) → auto-handled by dispatcher
             #   device CTPP 0x1840/0x000A (device's RTPC link)
             #   phone ACK 0x1800 → call_counter +0x01000000 (only byte[5] +1)
             #   device ACK 0x1800
-            #   phone video config → call_counter +0x00010000
 
             # Wait for device to open its own RTPC channel
             try:
@@ -357,7 +371,7 @@ class VideoCallSession:
                     else 0
                 )
                 _LOGGER.debug(
-                    "Pre-video-config: %d bytes type=0x%04X action=0x%04X",
+                    "Post-video-config: %d bytes type=0x%04X action=0x%04X",
                     len(resp_dev_link), msg_type, action,
                 )
                 if msg_type == 0x1840 and action == 0x000A:
@@ -374,17 +388,6 @@ class VideoCallSession:
                 if msg_type == 0x1800:
                     continue  # Skip device ACKs
 
-            # Step 9b: Video config trigger (uses our RTPC2 req_id)
-            # PCAP: +0x00010000 from ACK of device's RTPC link
-            call_counter += _CTR_INCR_BYTE4
-            vid_config = encode_video_config(
-                our_addr, entrance_addr, media_req_id, call_counter
-            )
-            await client.send_binary(ctpp, vid_config)
-            _LOGGER.debug(
-                "Sent video config, our_counter=0x%08X", call_counter
-            )
-
             # Step 10: Set media req_id and start decoder.
             # (keepalive already started after start_control)
             receiver.set_media_req_id(media_req_id)
@@ -396,6 +399,17 @@ class VideoCallSession:
             # by the client, so raw RTP data goes directly to receiver.
             self._tcp_task = asyncio.create_task(
                 self._tcp_video_loop(client, rtpc2, receiver)
+            )
+
+            # Step 10c: Start CTPP monitor loop.
+            # The device sends periodic 0x1840 keepalive/status messages on the
+            # CTPP channel during the call. If we don't ACK them, it drops the
+            # session after ~30 seconds. This loop reads and ACKs those messages,
+            # including performing re-establishment when CALL_END (0x0003) arrives.
+            self._ctpp_task = asyncio.create_task(
+                self._ctpp_monitor_loop(
+                    client, ctpp, our_addr, entrance_addr, call_counter,
+                )
             )
             self._active = True
 
@@ -444,6 +458,12 @@ class VideoCallSession:
             with contextlib.suppress(BaseException):
                 await tcp_task
 
+        ctpp_task, self._ctpp_task = self._ctpp_task, None
+        if ctpp_task:
+            ctpp_task.cancel()
+            with contextlib.suppress(BaseException):
+                await ctpp_task
+
         receiver, self._rtp_receiver = self._rtp_receiver, None
         if receiver:
             with contextlib.suppress(Exception):
@@ -475,6 +495,67 @@ class VideoCallSession:
             pass
         except Exception:
             _LOGGER.debug("TCP video loop error", exc_info=True)
+
+    async def _ctpp_monitor_loop(
+        self,
+        client: IconaBridgeClient,
+        ctpp: "Channel",
+        our_addr: str,
+        entrance_addr: str,
+        call_counter: int,
+    ) -> None:
+        """Read and ACK incoming CTPP messages during the active video session.
+
+        The device sends periodic 0x1840 messages throughout the call:
+        - 0x0000: keepalive — ACK with bare 0x1800
+        - 0x0003: CALL_END — device lease timer expired; ACK and stop session
+            so camera.py can restart a fresh session immediately.
+        0x1800 device ACKs are silently ignored.
+        """
+        try:
+            while self._active:
+                resp = await client.read_response(ctpp, timeout=2.0)
+                if not resp or len(resp) < 2:
+                    continue
+                msg_type = struct.unpack_from("<H", resp, 0)[0]
+                action = (
+                    struct.unpack_from(">H", resp, 6)[0]
+                    if len(resp) >= 8 else 0
+                )
+                if msg_type == 0x1840:
+                    if action == 0x0003:
+                        # CALL_END: the device has terminated its lease (~30s timer).
+                        # PCAP analysis confirms there is no in-session renewal —
+                        # the app always starts a completely new session after CALL_END.
+                        # ACK it and stop this session; camera.py will restart cleanly.
+                        call_counter += _CTR_INCR_BYTE5
+                        ack = encode_call_response_ack(our_addr, entrance_addr, call_counter)
+                        await client.send_binary(ctpp, ack)
+                        _LOGGER.info(
+                            "CTPP monitor: CALL_END received — stopping session for restart"
+                        )
+                        self._active = False
+                        return
+                    else:
+                        # Keepalive (0x0000) or other 0x1840 — bare ACK
+                        call_counter += _CTR_INCR_BYTE4
+                        ack = encode_call_response_ack(our_addr, entrance_addr, call_counter)
+                        await client.send_binary(ctpp, ack)
+                        _LOGGER.debug(
+                            "CTPP monitor: ACKed 0x1840/0x%04X, counter=0x%08X",
+                            action, call_counter,
+                        )
+                elif msg_type == 0x1800:
+                    pass  # device ACK — no response needed
+                else:
+                    _LOGGER.debug(
+                        "CTPP monitor: unexpected type=0x%04X (%d bytes)",
+                        msg_type, len(resp),
+                    )
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            _LOGGER.debug("CTPP monitor loop error", exc_info=True)
 
     async def _auto_timeout_loop(self) -> None:
         """Automatically stop the session after VIDEO_SESSION_TIMEOUT."""

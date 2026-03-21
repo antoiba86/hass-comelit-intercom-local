@@ -8,5 +8,5 @@
   "issue_tracker": "https://github.com/antoiba86/ComelitIntercomLocal/issues",
   "iot_class": "local_push",
   "requirements": ["aiohttp>=3.9", "av>=12.0.0"],
-  "version": "0.1.0"
+  "version": "0.1.1"
 }
