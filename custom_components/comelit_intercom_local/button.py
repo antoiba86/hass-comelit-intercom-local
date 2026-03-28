@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 
 from homeassistant.components.button import ButtonEntity
 from homeassistant.core import HomeAssistant
@@ -111,11 +112,13 @@ class ComelitStartVideoButton(CoordinatorEntity[ComelitLocalCoordinator], Button
         """Start intercom video when pressed."""
         if not self.coordinator.device_config:
             return
+        t0 = time.monotonic()
         _LOGGER.info("Starting intercom video")
         try:
             await self.coordinator.async_start_video()
+            _LOGGER.info("Video ready in %.1fs", time.monotonic() - t0)
         except Exception:
-            _LOGGER.exception("Failed to start intercom video")
+            _LOGGER.exception("Failed to start intercom video after %.1fs", time.monotonic() - t0)
 
 
 class ComelitStopVideoButton(CoordinatorEntity[ComelitLocalCoordinator], ButtonEntity):

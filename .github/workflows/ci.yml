@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: ["main", "fix/**", "ci/**", "feature/**"]
+    branches: ["main", "fix/**", "ci/**", "feature/**", "feat/**"]
   pull_request:
     branches: ["main"]
 
@@ -33,6 +33,7 @@ jobs:
             tests/test_protocol.py \
             tests/test_client.py \
             tests/test_rtp_receiver.py \
+            tests/test_rtsp_server.py \
             tests/test_token.py \
             tests/test_video_call.py \
             tests/test_video_signaling.py \

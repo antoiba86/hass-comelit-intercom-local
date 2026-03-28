@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from collections.abc import Callable
 import logging
 import struct
 import time
@@ -14,14 +15,19 @@ from .client import IconaBridgeClient
 from .exceptions import VideoCallError
 from .models import DeviceConfig
 from .protocol import (
+    encode_answer_config_ack,
+    encode_answer_peer,
+    encode_answer_video_reconfig,
     encode_call_ack,
     encode_call_init,
     encode_call_response_ack,
     encode_ctpp_init,
     encode_rtpc_link,
     encode_video_config,
+    encode_video_config_resp,
 )
 from .rtp_receiver import RtpReceiver
+from .rtsp_server import LocalRtspServer
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -63,14 +69,19 @@ class VideoCallSession:
         token: str,
         config: DeviceConfig,
         auto_timeout: bool = True,
+        rtsp_server: LocalRtspServer | None = None,
+        on_call_end: Callable[[], None] | None = None,
     ) -> None:
         self._host = host
         self._port = port
         self._token = token
         self._config = config
         self._auto_timeout = auto_timeout
+        self._external_rtsp = rtsp_server is not None
+        self._on_call_end = on_call_end
         self._client: IconaBridgeClient | None = None
         self._rtp_receiver: RtpReceiver | None = None
+        self._rtsp_server: LocalRtspServer | None = rtsp_server
         self._timeout_task: asyncio.Task | None = None
         self._tcp_task: asyncio.Task | None = None
         self._ctpp_task: asyncio.Task | None = None
@@ -85,6 +96,11 @@ class VideoCallSession:
     def rtp_receiver(self) -> RtpReceiver | None:
         """Return the RTP receiver for getting video frames."""
         return self._rtp_receiver
+
+    @property
+    def rtsp_server(self) -> LocalRtspServer | None:
+        """Return the RTSP server for go2rtc stream_source."""
+        return self._rtsp_server
 
     def _ts(self) -> int:
         """Return current timestamp for CTPP messages."""
@@ -205,6 +221,17 @@ class VideoCallSession:
                 media_req_id=0,  # set later after RTPC2 opens
                 udpm_token=udpm_token,
             )
+            if self._rtsp_server and self._external_rtsp:
+                # Reuse coordinator-owned persistent RTSP server
+                self._rtsp_server.reset()
+                rtsp_server = self._rtsp_server
+            else:
+                # Standalone mode (tests) — create and own our own server
+                rtsp_server = LocalRtspServer()
+                await rtsp_server.start()
+                self._rtsp_server = rtsp_server
+            receiver.attach_rtsp_queues(rtsp_server.nal_queue, rtsp_server.audio_queue)
+
             # Open UDP socket + send 2 discovery packets so the device knows
             # our UDP port before video config. Start keepalive immediately so
             # the device doesn't time out during the codec exchange / RTPC setup
@@ -388,10 +415,35 @@ class VideoCallSession:
                 if msg_type == 0x1800:
                     continue  # Skip device ACKs
 
-            # Step 10: Set media req_id and start decoder.
-            # (keepalive already started after start_control)
+            # Step 9b: Send initial HANGUP/ZERO (0x1840/0x0000) to signal "call accepted".
+            # PCAP (PCAPdroid_06_Mar_23_28_05): app sends this ~3s after video setup.
+            # Device ACKs with 0x1800/0x0000. This tells the device we're ready.
+            # The 30s lease timer runs from here; CALL_END arrives ~30s later.
+            # Session restart on CALL_END is handled in _ctpp_monitor_loop.
+            call_counter += _CTR_INCR_BYTE4
+            hangup_zero = encode_call_response_ack(
+                our_addr, entrance_addr, call_counter, prefix=0x1840
+            )
+            await client.send_binary(ctpp, hangup_zero)
+            _LOGGER.debug(
+                "Sent initial HANGUP/ZERO (call accepted), counter=0x%08X", call_counter
+            )
+
+            # Step 10: Set media req_id and start decoder immediately.
+            # Answer sequence runs concurrently (step 9c below) so video is
+            # visible without waiting for the 5s audio RTPC timeout.
             receiver.set_media_req_id(media_req_id)
             await receiver.start_media()
+
+            # Step 9c: Answer sequence — send 3 messages to trigger audio.
+            # Runs as a fire-and-forget task so start() returns immediately.
+            # Non-fatal: if it fails or times out, video still works fine.
+            asyncio.create_task(
+                self._run_answer_sequence(
+                    client, ctpp, our_addr, entrance_addr, apt_addr,
+                    call_counter, media_req_id,
+                )
+            )
 
             # Step 10b: Start TCP video reader for RTPC2.
             # The device sends RTP over TCP (on RTPC2) instead of UDP in some
@@ -405,10 +457,11 @@ class VideoCallSession:
             # The device sends periodic 0x1840 keepalive/status messages on the
             # CTPP channel during the call. If we don't ACK them, it drops the
             # session after ~30 seconds. This loop reads and ACKs those messages,
-            # including performing re-establishment when CALL_END (0x0003) arrives.
+            # and triggers a full session restart when CALL_END (0x0003) arrives.
             self._ctpp_task = asyncio.create_task(
                 self._ctpp_monitor_loop(
                     client, ctpp, our_addr, entrance_addr, call_counter,
+                    rtpc1.server_channel_id, media_req_id,
                 )
             )
             self._active = True
@@ -435,9 +488,9 @@ class VideoCallSession:
                 f"Failed to start video call: {e}"
             ) from e
 
-    async def stop(self) -> None:
+    async def stop(self, reason: str = "user request") -> None:
         """Stop the video session and clean up."""
-        _LOGGER.info("Stopping video call session")
+        _LOGGER.info("Stopping video call session (%s)", reason)
         await self._cleanup()
 
     async def _cleanup(self) -> None:
@@ -461,6 +514,11 @@ class VideoCallSession:
         if receiver:
             with contextlib.suppress(Exception):
                 await receiver.stop()
+
+        if self._rtsp_server and not self._external_rtsp:
+            with contextlib.suppress(Exception):
+                await self._rtsp_server.stop()
+            self._rtsp_server = None
 
         client, self._client = self._client, None
         if client:
@@ -496,13 +554,15 @@ class VideoCallSession:
         our_addr: str,
         entrance_addr: str,
         call_counter: int,
+        rtpc1_server_id: int,
+        media_req_id: int,
     ) -> None:
         """Read and ACK incoming CTPP messages during the active video session.
 
         The device sends periodic 0x1840 messages throughout the call:
         - 0x0000: keepalive — ACK with bare 0x1800
-        - 0x0003: CALL_END — device lease timer expired; ACK and stop session
-            so camera.py can restart a fresh session immediately.
+        - 0x0003: CALL_END — device lease timer expired; perform inline
+            re-establishment (same TCP connection, no session restart).
         0x1800 device ACKs are silently ignored.
         """
         try:
@@ -517,18 +577,25 @@ class VideoCallSession:
                 )
                 if msg_type == 0x1840:
                     if action == 0x0003:
-                        # CALL_END: the device has terminated its lease (~30s timer).
-                        # PCAP analysis confirms there is no in-session renewal —
-                        # the app always starts a completely new session after CALL_END.
-                        # ACK it and stop this session; camera.py will restart cleanly.
-                        call_counter += _CTR_INCR_BYTE5
-                        ack = encode_call_response_ack(our_addr, entrance_addr, call_counter)
-                        await client.send_binary(ctpp, ack)
-                        _LOGGER.info(
-                            "CTPP monitor: CALL_END received — stopping session for restart"
-                        )
-                        self._active = False
-                        return
+                        # CALL_END: full media session restart on same TCP connection.
+                        # Simple RTPC_LINK-refresh does NOT work (device never reopens RTPC).
+                        _LOGGER.debug("CTPP monitor: CALL_END received — re-establishing")
+                        try:
+                            call_counter = await self._inline_reestablish(
+                                client, ctpp, our_addr, entrance_addr,
+                                rtpc1_server_id, media_req_id, call_counter,
+                            )
+                            _LOGGER.debug("CTPP monitor: re-established, lease renewed")
+                        except Exception:
+                            _LOGGER.warning(
+                                "CTPP monitor: re-establishment failed",
+                                exc_info=True,
+                            )
+                            # BACKUP (full session restart — commented out intentionally):
+                            # self._active = False
+                            # if self._on_call_end:
+                            #     self._on_call_end()
+                            # return
                     else:
                         # Keepalive (0x0000) or other 0x1840 — bare ACK
                         call_counter += _CTR_INCR_BYTE4
@@ -549,6 +616,214 @@ class VideoCallSession:
             pass
         except Exception:
             _LOGGER.debug("CTPP monitor loop error", exc_info=True)
+
+    async def _inline_reestablish(
+        self,
+        client: IconaBridgeClient,
+        ctpp: "Channel",
+        our_addr: str,
+        entrance_addr: str,
+        rtpc1_server_id: int,
+        media_req_id: int,
+        call_counter: int,
+    ) -> int:
+        """Perform inline re-establishment after CALL_END, returning updated counter.
+
+        NOTE: The simple RTPC_LINK-refresh approach (tried previously) does NOT work:
+        the device responds with 0x1860/0x000A but never reopens its own RTPC channel,
+        so video stays frozen. A full media session restart is required instead:
+        new call_init + codec exchange + RTPC_LINK + VIDEO_CONFIG on the same TCP/CTPP.
+        This mirrors what standalone_video_test.py's _ctpp_monitor() does.
+        """
+        # 1. ACK CALL_END (+_CTR_INCR_BYTE5)
+        call_counter += _CTR_INCR_BYTE5
+        ack = encode_call_response_ack(our_addr, entrance_addr, call_counter)
+        await client.send_binary(ctpp, ack)
+
+        # 2. New CTPP init — restarts the session on the same connection
+        apt_addr = our_addr[:-1]   # e.g. "SB000006" (without subaddress digit)
+        apt_sub  = int(our_addr[-1])
+        init_ts  = int(time.monotonic() * 1000) & 0xFFFFFFFF
+        init_payload = encode_ctpp_init(apt_addr, apt_sub, init_ts)
+        await client.send_binary(ctpp, init_payload)
+
+        # 3. Read 2 init responses
+        for _ in range(2):
+            await client.read_response(ctpp, timeout=2.0)
+
+        # 4. Send init ACKs
+        ack_ts = (init_ts + _CTR_INCR_BOTH) & 0xFFFFFFFF
+        await client.send_binary(ctpp, encode_call_response_ack(our_addr, apt_addr, ack_ts))
+        await client.send_binary(ctpp, encode_call_response_ack(our_addr, apt_addr, ack_ts, prefix=0x1820))
+
+        # 5. Register placeholder for device's new RTPC channel
+        device_rtpc = client.register_placeholder_channel("RTPC_DEVICE_REEST")
+
+        # 6. Call init + codec exchange
+        call_ts = (init_ts + 1) & 0xFFFFFFFF
+        call_counter = call_ts
+        await client.send_binary(ctpp, encode_call_init(our_addr, entrance_addr, call_ts))
+
+        await client.read_response(ctpp, timeout=3.0)  # call init response
+
+        call_counter += _CTR_INCR_BYTE4
+        await client.send_binary(ctpp, encode_call_ack(our_addr, entrance_addr, call_counter))
+
+        codec_ok = False
+        for _ in range(10):
+            r = await client.read_response(ctpp, timeout=3.0)
+            if not r or len(r) < 2:
+                break
+            r_type   = struct.unpack_from("<H", r, 0)[0]
+            r_action = struct.unpack_from(">H", r, 6)[0] if len(r) >= 8 else 0
+            if r_type in (0x1860, 0x1800):
+                continue
+            if r_type == 0x1840:
+                if r_action == 0x0008:
+                    call_counter += _CTR_INCR_BOTH
+                elif r_action == 0x0002:
+                    call_counter += _CTR_INCR_BYTE5
+                    codec_ok = True
+                else:
+                    call_counter += _CTR_INCR_BYTE4
+                await client.send_binary(
+                    ctpp, encode_call_response_ack(our_addr, entrance_addr, call_counter)
+                )
+                if codec_ok:
+                    break
+
+        if not codec_ok:
+            _LOGGER.warning("Re-establish: codec exchange incomplete — continuing anyway")
+
+        # 7. RTPC_LINK + VIDEO_CONFIG (reuse existing channels)
+        await client.send_binary(
+            ctpp, encode_rtpc_link(our_addr, entrance_addr, rtpc1_server_id, call_counter)
+        )
+        call_counter += _CTR_INCR_BYTE4
+        await client.send_binary(
+            ctpp, encode_video_config(our_addr, entrance_addr, media_req_id, call_counter)
+        )
+
+        # Wait for device to open its RTPC channel
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(device_rtpc.open_event.wait(), timeout=5.0)
+
+        # Read + ACK device's RTPC link message
+        for _ in range(5):
+            r = await client.read_response(ctpp, timeout=2.0)
+            if not r or len(r) < 2:
+                break
+            r_type   = struct.unpack_from("<H", r, 0)[0]
+            r_action = struct.unpack_from(">H", r, 6)[0] if len(r) >= 8 else 0
+            if r_type == 0x1840 and r_action == 0x000A:
+                call_counter += _CTR_INCR_BYTE5
+                await client.send_binary(
+                    ctpp, encode_call_response_ack(our_addr, entrance_addr, call_counter)
+                )
+                break
+            if r_type == 0x1800:
+                continue
+
+        # HANGUP/ZERO to signal call accepted again
+        call_counter += _CTR_INCR_BYTE4
+        await client.send_binary(
+            ctpp,
+            encode_call_response_ack(our_addr, entrance_addr, call_counter, prefix=0x1840),
+        )
+
+        # Drain stale RTSP queues — keep seq/ts monotonic so go2rtc stays connected
+        if self._rtsp_server:
+            self._rtsp_server.reset(renewal=True)
+
+        _LOGGER.debug("Re-establish: done, counter=0x%08X", call_counter)
+        return call_counter
+
+    async def _run_answer_sequence(
+        self,
+        client: IconaBridgeClient,
+        ctpp: "Channel",
+        our_addr: str,
+        entrance_addr: str,
+        apt_addr: str,
+        call_counter: int,
+        media_req_id: int,
+    ) -> None:
+        """Run answer sequence as a background task (fire-and-forget)."""
+        try:
+            await self._send_answer_sequence(
+                client, ctpp, our_addr, entrance_addr, apt_addr,
+                call_counter, media_req_id,
+            )
+        except Exception:
+            _LOGGER.warning("Answer sequence failed — continuing with video only", exc_info=True)
+
+    async def _send_answer_sequence(
+        self,
+        client: IconaBridgeClient,
+        ctpp: "Channel",
+        our_addr: str,
+        entrance_addr: str,
+        apt_addr: str,
+        call_counter: int,
+        media_req_id: int,
+    ) -> None:
+        """Send the 3-message answer sequence to trigger audio.
+
+        After the answer sequence, the device opens a new RTPC channel
+        for audio (~3.5s later). We wait up to 5s for it; if it doesn't
+        arrive, video still works without audio.
+        """
+        # Register placeholder for device's audio RTPC channel
+        audio_rtpc = client.register_placeholder_channel("RTPC_AUDIO")
+
+        # Build apt_subaddress string: apt_addr + subaddress digit
+        apt_sub = self._config.apt_subaddress
+        apt_subaddress = f"{apt_addr}{apt_sub}"
+
+        # Message 1: Video config re-negotiate (callee = apt_addr, NOT entrance_addr)
+        call_counter += _CTR_INCR_BYTE4
+        await client.send_binary(
+            ctpp,
+            encode_answer_video_reconfig(our_addr, apt_addr, media_req_id, call_counter),
+        )
+
+        await asyncio.sleep(0.2)
+
+        # Message 2: Peer/accept call
+        call_counter += _CTR_INCR_BYTE4
+        await client.send_binary(
+            ctpp,
+            encode_answer_peer(our_addr, apt_addr, apt_subaddress, call_counter),
+        )
+
+        await asyncio.sleep(0.2)
+
+        # Message 3: Supplemental config ACK
+        call_counter += _CTR_INCR_BYTE4
+        await client.send_binary(
+            ctpp,
+            encode_answer_config_ack(our_addr, apt_addr, call_counter),
+        )
+        _LOGGER.debug(
+            "Answer msg 3 (config ACK) sent, counter=0x%08X", call_counter
+        )
+
+        _LOGGER.info("Answer sequence sent — waiting for audio RTPC channel")
+
+        # Wait for device to open audio RTPC channel (up to 5s).
+        # The client dispatcher auto-ACKs device channel opens and assigns
+        # them to the placeholder, so we just wait for the open_event.
+        try:
+            await asyncio.wait_for(audio_rtpc.open_event.wait(), timeout=5.0)
+            _LOGGER.info(
+                "Audio RTPC channel opened: 0x%04X",
+                audio_rtpc.server_channel_id,
+            )
+        except TimeoutError:
+            _LOGGER.warning(
+                "Audio RTPC channel not received within 5s — "
+                "continuing with video only"
+            )
 
     async def _auto_timeout_loop(self) -> None:
         """Automatically stop the session after VIDEO_SESSION_TIMEOUT."""
