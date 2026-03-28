@@ -56,7 +56,7 @@ class ComelitLocalConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 try:
                     token = await extract_token(host, password, http_port)
                 except Exception as err:
-                    _LOGGER.exception("Token extraction failed: %s", err)
+                    _LOGGER.exception("Token extraction failed: %s", err)  # nosemgrep: python-logger-credential-disclosure
                     errors["base"] = "token_extraction_failed"
 
             if not errors:

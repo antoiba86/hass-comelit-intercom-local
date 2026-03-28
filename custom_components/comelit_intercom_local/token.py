@@ -23,7 +23,7 @@ TOKEN_PATTERN = re.compile(r'9:4:"([a-f0-9]{32})"', re.IGNORECASE)
 
 async def extract_token(
     host: str,
-    password: str = "comelit",
+    password: str = "comelit",  # nosemgrep: hardcoded-password-default-argument
     http_port: int = 8080,
 ) -> str | None:
     """Extract the 32-char hex authentication token from the device backup.
@@ -132,7 +132,7 @@ def _parse_token_from_archive(archive_data: bytes) -> str | None:
                         # Skip null tokens (all zeros)
                         for token in matches:
                             if token != "00000000000000000000000000000000":
-                                _LOGGER.debug("Extracted token: %s...%s", token[:4], token[-4:])
+                                _LOGGER.debug("Extracted token: %s...%s", token[:4], token[-4:])  # nosemgrep: python-logger-credential-disclosure
                                 return token
 
                     raise TokenExtractionError(

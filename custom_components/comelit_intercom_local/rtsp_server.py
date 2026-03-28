@@ -113,11 +113,11 @@ class LocalRtspServer:
         Feed tasks run until stop() — they broadcast to whoever is registered.
         """
         self._video_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self._video_sock.bind(("0.0.0.0", 0))
+        self._video_sock.bind((self._bind_host, 0))
         self._video_server_port = self._video_sock.getsockname()[1]
 
         self._audio_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self._audio_sock.bind(("0.0.0.0", 0))
+        self._audio_sock.bind((self._bind_host, 0))
         self._audio_server_port = self._audio_sock.getsockname()[1]
 
         self._server = await asyncio.start_server(
