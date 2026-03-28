@@ -3,15 +3,23 @@
 import struct
 
 from custom_components.comelit_intercom_local.protocol import (
+    ACTION_CONFIG_ACK,
+    ACTION_HANGUP,
+    ACTION_PEER,
+    ACTION_VIDEO_CONFIG,
     HEADER_MAGIC,
     HEADER_SIZE,
     MessageType,
     _CTPP_LEGACY_TS,
     decode_header,
+    encode_answer_config_ack,
+    encode_answer_peer,
+    encode_answer_video_reconfig,
     encode_channel_close,
     encode_channel_open,
     encode_ctpp_init,
     encode_door_init,
+    encode_hangup,
     encode_header,
     encode_json_message,
     encode_open_door,
@@ -186,3 +194,125 @@ class TestVideoPayloads:
         # Should NOT contain the 800x480 resolution from encode_video_config
         assert struct.pack("<H", 800) not in msg
         assert struct.pack("<H", 480) not in msg
+
+
+class TestAnswerSequencePayloads:
+    """Tests for the audio-enabling answer sequence protocol messages."""
+
+    def test_encode_answer_video_reconfig_prefix(self):
+        """encode_answer_video_reconfig uses 0x1840 prefix."""
+        msg = encode_answer_video_reconfig("SB0000061", "SB000006", 0xABCD, 0x12345678)
+        prefix = struct.unpack_from("<H", msg, 0)[0]
+        assert prefix == 0x1840
+
+    def test_encode_answer_video_reconfig_action(self):
+        """encode_answer_video_reconfig uses ACTION_VIDEO_CONFIG (0x001A)."""
+        msg = encode_answer_video_reconfig("SB0000061", "SB000006", 0xABCD, 0x12345678)
+        action = struct.unpack_from(">H", msg, 6)[0]
+        assert action == ACTION_VIDEO_CONFIG
+
+    def test_encode_answer_video_reconfig_default_resolution(self):
+        """encode_answer_video_reconfig defaults to 800x480."""
+        msg = encode_answer_video_reconfig("SB0000061", "SB000006", 0xABCD, 0x12345678)
+        assert struct.pack("<H", 800) in msg
+        assert struct.pack("<H", 480) in msg
+
+    def test_encode_answer_video_reconfig_custom_resolution(self):
+        """encode_answer_video_reconfig accepts custom width/height/fps."""
+        msg = encode_answer_video_reconfig(
+            "SB0000061", "SB000006", 0xABCD, 0x12345678, width=640, height=360, fps=25
+        )
+        assert struct.pack("<H", 640) in msg
+        assert struct.pack("<H", 360) in msg
+
+    def test_encode_answer_video_reconfig_contains_rtpc2_id(self):
+        """encode_answer_video_reconfig embeds rtpc2_req_id in the extra block."""
+        msg = encode_answer_video_reconfig("SB0000061", "SB000006", 0x5A5A, 0x12345678)
+        assert struct.pack("<H", 0x5A5A) in msg
+
+    def test_encode_answer_video_reconfig_timestamp(self):
+        """encode_answer_video_reconfig embeds timestamp in LE32."""
+        ts = 0xDEADBEEF
+        msg = encode_answer_video_reconfig("SB0000061", "SB000006", 0, ts)
+        assert struct.pack("<I", ts) in msg
+
+    def test_encode_answer_peer_prefix(self):
+        """encode_answer_peer uses 0x1840 prefix."""
+        msg = encode_answer_peer("SB0000061", "SB000006", "1", 0x12345678)
+        prefix = struct.unpack_from("<H", msg, 0)[0]
+        assert prefix == 0x1840
+
+    def test_encode_answer_peer_action(self):
+        """encode_answer_peer uses ACTION_PEER (0x0070) at offset 8."""
+        msg = encode_answer_peer("SB0000061", "SB000006", "1", 0x12345678)
+        action = struct.unpack_from(">H", msg, 8)[0]
+        assert action == ACTION_PEER
+
+    def test_encode_answer_peer_contains_subaddress(self):
+        """encode_answer_peer embeds apt_subaddress null-terminated."""
+        msg = encode_answer_peer("SB0000061", "SB000006", "1", 0x12345678)
+        assert b"1\x00" in msg
+
+    def test_encode_answer_peer_contains_marker(self):
+        """encode_answer_peer contains 0xFFFFFFFF separator."""
+        msg = encode_answer_peer("SB0000061", "SB000006", "1", 0x12345678)
+        assert b"\xff\xff\xff\xff" in msg
+
+    def test_encode_answer_peer_inner_len_matches_payload(self):
+        """encode_answer_peer inner_len == len(apt_subaddress\\0) + 4."""
+        subaddr = "12"
+        msg = encode_answer_peer("SB0000061", "SB000006", subaddr, 0x12345678)
+        inner_len = struct.unpack_from(">H", msg, 6)[0]
+        expected = len(subaddr.encode("ascii") + b"\x00") + 4
+        assert inner_len == expected
+
+    def test_encode_answer_config_ack_prefix(self):
+        """encode_answer_config_ack uses 0x1840 prefix."""
+        msg = encode_answer_config_ack("SB0000061", "SB000006", 0x12345678)
+        prefix = struct.unpack_from("<H", msg, 0)[0]
+        assert prefix == 0x1840
+
+    def test_encode_answer_config_ack_action(self):
+        """encode_answer_config_ack uses ACTION_CONFIG_ACK (0x000C) at offset 8."""
+        msg = encode_answer_config_ack("SB0000061", "SB000006", 0x12345678)
+        action = struct.unpack_from(">H", msg, 8)[0]
+        assert action == ACTION_CONFIG_ACK
+
+    def test_encode_answer_config_ack_inner_len(self):
+        """encode_answer_config_ack inner_len is always 2."""
+        msg = encode_answer_config_ack("SB0000061", "SB000006", 0x12345678)
+        inner_len = struct.unpack_from(">H", msg, 6)[0]
+        assert inner_len == 2
+
+    def test_encode_answer_config_ack_contains_marker(self):
+        """encode_answer_config_ack contains 0xFFFFFFFF separator."""
+        msg = encode_answer_config_ack("SB0000061", "SB000006", 0x12345678)
+        assert b"\xff\xff\xff\xff" in msg
+
+    def test_encode_hangup_prefix(self):
+        """encode_hangup uses 0x1830 prefix."""
+        msg = encode_hangup("SB0000061", "SB100001", 0x12345678)
+        prefix = struct.unpack_from("<H", msg, 0)[0]
+        assert prefix == 0x1830
+
+    def test_encode_hangup_action(self):
+        """encode_hangup uses ACTION_HANGUP (0x002D) at offset 6."""
+        msg = encode_hangup("SB0000061", "SB100001", 0x12345678)
+        action = struct.unpack_from(">H", msg, 6)[0]
+        assert action == ACTION_HANGUP
+
+    def test_encode_hangup_contains_entrance_addr(self):
+        """encode_hangup embeds entrance_addr null-terminated."""
+        msg = encode_hangup("SB0000061", "SB100001", 0x12345678)
+        assert b"SB100001\x00" in msg
+
+    def test_encode_hangup_contains_caller(self):
+        """encode_hangup embeds caller null-terminated."""
+        msg = encode_hangup("SB0000061", "SB100001", 0x12345678)
+        assert b"SB0000061\x00" in msg
+
+    def test_encode_hangup_timestamp(self):
+        """encode_hangup embeds timestamp in LE32."""
+        ts = 0xCAFEBABE
+        msg = encode_hangup("SB0000061", "SB100001", ts)
+        assert struct.pack("<I", ts) in msg

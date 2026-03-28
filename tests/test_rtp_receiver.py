@@ -355,6 +355,36 @@ class TestQueueNal:
         receiver._queue_nal(b"\x00\x00\x00\x01\x67")
         assert receiver._nal_queue.full()
 
+    def test_nal_also_pushed_to_rtsp_queue(self):
+        """_queue_nal pushes NAL to RTSP fanout queue when attached."""
+        receiver = RtpReceiver("127.0.0.1")
+        rtsp_nal_q = asyncio.Queue()
+        receiver.attach_rtsp_queues(rtsp_nal_q, asyncio.Queue())
+
+        nal = b"\x00\x00\x00\x01\x67" + b"\x00" * 10
+        receiver._queue_nal(nal)
+
+        assert not receiver._nal_queue.empty()
+        assert not rtsp_nal_q.empty()
+        assert rtsp_nal_q.get_nowait() == nal
+
+    def test_rtsp_nal_queue_full_drops_silently(self):
+        """_queue_nal drops silently when RTSP fanout queue is full."""
+        receiver = RtpReceiver("127.0.0.1")
+        rtsp_nal_q = asyncio.Queue(maxsize=1)
+        rtsp_nal_q.put_nowait(b"already_full")
+        receiver.attach_rtsp_queues(rtsp_nal_q, asyncio.Queue())
+
+        nal = b"\x00\x00\x00\x01\x67" + b"\x00" * 10
+        receiver._queue_nal(nal)  # Must not raise
+
+    def test_nal_queue_still_receives_when_no_rtsp(self):
+        """_queue_nal works normally when no RTSP queues are attached."""
+        receiver = RtpReceiver("127.0.0.1")
+        nal = b"\x00\x00\x00\x01\x65" + b"\x00" * 10
+        receiver._queue_nal(nal)
+        assert not receiver._nal_queue.empty()
+
 
 # ---------------------------------------------------------------------------
 # get_jpeg_frame and latest_frame
@@ -585,3 +615,145 @@ class TestFrameToJpeg:
 
         result = RtpReceiver._frame_to_jpeg(BrokenFrame())
         assert result is None
+
+
+# ---------------------------------------------------------------------------
+# attach_rtsp_queues
+# ---------------------------------------------------------------------------
+
+
+class TestAttachRtspQueues:
+    def test_attach_sets_queues(self):
+        """attach_rtsp_queues stores the provided queue references."""
+        receiver = RtpReceiver("127.0.0.1")
+        nal_q = asyncio.Queue()
+        audio_q = asyncio.Queue()
+        receiver.attach_rtsp_queues(nal_q, audio_q)
+        assert receiver._rtsp_nal_queue is nal_q
+        assert receiver._rtsp_audio_queue is audio_q
+
+    def test_initial_state_has_no_rtsp_queues(self):
+        """RTSP queues start as None (not attached)."""
+        receiver = RtpReceiver("127.0.0.1")
+        assert receiver._rtsp_nal_queue is None
+        assert receiver._rtsp_audio_queue is None
+
+    def test_attach_can_be_called_multiple_times(self):
+        """attach_rtsp_queues can replace queues with new ones."""
+        receiver = RtpReceiver("127.0.0.1")
+        q1 = asyncio.Queue()
+        receiver.attach_rtsp_queues(q1, asyncio.Queue())
+        q2 = asyncio.Queue()
+        receiver.attach_rtsp_queues(q2, asyncio.Queue())
+        assert receiver._rtsp_nal_queue is q2
+
+
+# ---------------------------------------------------------------------------
+# Audio routing: _process_audio_rtp and _process_rtp PT routing
+# ---------------------------------------------------------------------------
+
+
+def _make_audio_rtp(pt: int, payload: bytes = b"\xd5" * 160) -> bytes:
+    """Build a minimal valid RTP packet with the given payload type."""
+    header = bytes([
+        0x80,       # V=2, P=0, X=0, CC=0
+        pt & 0x7F,  # M=0, PT
+        0x00, 0x01, # seq=1
+        0x00, 0x00, 0x00, 0x00,  # timestamp=0
+        0x00, 0x00, 0x00, 0x01,  # ssrc=1
+    ])
+    return header + payload
+
+
+class TestAudioRouting:
+    def test_pcma_pt8_goes_to_audio_queue(self):
+        """PT=8 (PCMA) is routed to the RTSP audio queue, not the NAL queue."""
+        receiver = RtpReceiver("127.0.0.1")
+        audio_q = asyncio.Queue()
+        receiver.attach_rtsp_queues(asyncio.Queue(), audio_q)
+
+        rtp = _make_audio_rtp(8, b"\xd5" * 160)
+        receiver._process_rtp(rtp)
+
+        assert not audio_q.empty()
+        assert receiver._nal_queue.empty()
+
+    def test_pcmu_pt0_goes_to_audio_queue(self):
+        """PT=0 (PCMU) is routed to the RTSP audio queue, not the NAL queue."""
+        receiver = RtpReceiver("127.0.0.1")
+        audio_q = asyncio.Queue()
+        receiver.attach_rtsp_queues(asyncio.Queue(), audio_q)
+
+        rtp = _make_audio_rtp(0, b"\x7f" * 160)
+        receiver._process_rtp(rtp)
+
+        assert not audio_q.empty()
+        assert receiver._nal_queue.empty()
+
+    def test_audio_payload_content_correct(self):
+        """Audio payload in queue matches the RTP payload (strips 12-byte header)."""
+        receiver = RtpReceiver("127.0.0.1")
+        audio_q = asyncio.Queue()
+        receiver.attach_rtsp_queues(asyncio.Queue(), audio_q)
+
+        payload = b"\xd5" * 160
+        rtp = _make_audio_rtp(8, payload)
+        receiver._process_rtp(rtp)
+
+        queued = audio_q.get_nowait()
+        assert queued == payload
+
+    def test_audio_increments_packet_count(self):
+        """Each audio packet increments _audio_packet_count."""
+        receiver = RtpReceiver("127.0.0.1")
+        receiver.attach_rtsp_queues(asyncio.Queue(), asyncio.Queue())
+
+        for _ in range(3):
+            receiver._process_rtp(_make_audio_rtp(8))
+
+        assert receiver._audio_packet_count == 3
+
+    def test_audio_without_rtsp_queue_does_not_crash(self):
+        """Audio packets are handled gracefully even when no RTSP queues are attached."""
+        receiver = RtpReceiver("127.0.0.1")
+        rtp = _make_audio_rtp(8, b"\xd5" * 160)
+        receiver._process_rtp(rtp)  # Must not raise
+        assert receiver._audio_packet_count == 1
+
+    def test_audio_queue_full_drops_silently(self):
+        """Audio payload is silently dropped when RTSP audio queue is full."""
+        receiver = RtpReceiver("127.0.0.1")
+        audio_q = asyncio.Queue(maxsize=1)
+        audio_q.put_nowait(b"already_full")
+        receiver.attach_rtsp_queues(asyncio.Queue(), audio_q)
+
+        rtp = _make_audio_rtp(8, b"\xd5" * 160)
+        receiver._process_rtp(rtp)  # Must not raise
+
+    def test_empty_audio_payload_ignored(self):
+        """RTP audio packet with no payload after header is discarded."""
+        receiver = RtpReceiver("127.0.0.1")
+        audio_q = asyncio.Queue()
+        receiver.attach_rtsp_queues(asyncio.Queue(), audio_q)
+
+        rtp = _make_audio_rtp(8, b"")  # empty payload
+        receiver._process_rtp(rtp)
+
+        assert audio_q.empty()
+
+    def test_video_not_routed_to_audio_queue(self):
+        """Non-audio PT (e.g. PT=96 video) goes to NAL queue, not audio queue."""
+        receiver = RtpReceiver("127.0.0.1")
+        audio_q = asyncio.Queue()
+        nal_q = asyncio.Queue()
+        receiver.attach_rtsp_queues(nal_q, audio_q)
+
+        # PT=96 video packet with SPS NAL
+        header = bytes([0x80, 0x60, 0x00, 0x01,
+                        0x00, 0x00, 0x00, 0x00,
+                        0x00, 0x00, 0x00, 0x01])
+        rtp = header + b"\x67" + b"\x00" * 10
+        receiver._process_rtp(rtp)
+
+        assert audio_q.empty()
+        assert not receiver._nal_queue.empty()

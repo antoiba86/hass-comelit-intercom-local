@@ -55,14 +55,14 @@ class _UdpProtocol(asyncio.DatagramProtocol):
 
 
 class RtpReceiver:
-    """Receives ICONA-wrapped UDP video, decodes H.264 directly via PyAV.
+    """Receives ICONA-wrapped UDP video/audio, decodes H.264 via PyAV.
 
     Flow:
-    1. UDP socket connected to device — sends keepalives, receives video
+    1. UDP socket connected to device — sends keepalives, receives media
     2. Media packets (matched by media_req_id) get ICONA header + trailer stripped
-    3. RTP packets parsed, H.264 NAL units extracted (FU-A reassembled)
-    4. Raw H.264 stream fed to PyAV decoder
-    5. Decoded frames converted to JPEG
+    3. RTP payload type checked: PT 0/8 → audio queue; others → H.264 NAL pipeline
+    4. H.264 NAL units extracted (FU-A reassembled) → PyAV decode → JPEG
+    5. Audio (raw G.711 PCMU/PCMA bytes) → optional RTSP server fanout queue
     """
 
     def __init__(
@@ -91,6 +91,15 @@ class RtpReceiver:
         self._decode_task: asyncio.Task | None = None
         self._nal_queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=500)
 
+        # Optional fanout queues for RTSP server (attached via attach_rtsp_queues).
+        # When set, NALs and audio are also pushed here so the RTSP server can
+        # stream without interfering with the PyAV decode pipeline.
+        self._rtsp_nal_queue: asyncio.Queue[bytes] | None = None
+        self._rtsp_audio_queue: asyncio.Queue[bytes] | None = None
+
+        # Audio packet counter (for logging/stats)
+        self._audio_packet_count = 0
+
         # Latest decoded JPEG frame
         self._latest_frame: bytes | None = None
         self._frame_event = asyncio.Event()
@@ -99,6 +108,21 @@ class RtpReceiver:
         self._control_seq = 0
         self._media_packet_count = 0
         self._keepalive_task: asyncio.Task | None = None
+
+    def attach_rtsp_queues(
+        self,
+        nal_queue: asyncio.Queue[bytes],
+        audio_queue: asyncio.Queue[bytes],
+    ) -> None:
+        """Attach RTSP server queues for NAL/audio fanout.
+
+        When attached, every H.264 NAL and every audio payload is also
+        pushed to these queues so the RTSP server can stream them.
+        Call before start_media() so no packets are missed.
+        """
+        self._rtsp_nal_queue = nal_queue
+        self._rtsp_audio_queue = audio_queue
+        _LOGGER.debug("RTSP queues attached")
 
     async def start_control(self) -> int:
         """Open UDP socket and send 2 discovery packets.
@@ -217,10 +241,16 @@ class RtpReceiver:
             _LOGGER.debug("Received UDP control response (%d bytes)", len(data))
 
     def _process_rtp(self, rtp: bytes) -> None:
-        """Parse RTP packet, extract and reassemble H.264 NAL units."""
+        """Parse RTP packet — route to audio or H.264 pipeline by payload type."""
         byte0 = rtp[0]
         version = (byte0 >> 6) & 0x03
         if version != 2:
+            return
+
+        payload_type = rtp[1] & 0x7F
+        if payload_type in (0, 8):
+            # G.711 audio: PT 0 = PCMU (μ-law), PT 8 = PCMA (A-law)
+            self._process_audio_rtp(rtp, payload_type)
             return
 
         nal_data = rtp[12:]  # Skip 12-byte RTP header
@@ -262,12 +292,36 @@ class RtpReceiver:
             nal_bytes = b"\x00\x00\x00\x01" + nal_data
             self._queue_nal(nal_bytes)
 
+    def _process_audio_rtp(self, rtp: bytes, payload_type: int) -> None:
+        """Extract raw G.711 audio payload and push to RTSP fanout queue."""
+        audio_payload = rtp[12:]  # Skip 12-byte RTP header
+        if not audio_payload:
+            return
+        self._audio_packet_count += 1
+        if _LOGGER.isEnabledFor(logging.DEBUG) and self._audio_packet_count <= 3:
+            _LOGGER.debug(
+                "Audio RTP: PT=%d (%s), %d bytes payload",
+                payload_type,
+                "PCMU" if payload_type == 0 else "PCMA",
+                len(audio_payload),
+            )
+        if self._rtsp_audio_queue is not None:
+            try:
+                self._rtsp_audio_queue.put_nowait(audio_payload)
+            except asyncio.QueueFull:
+                pass  # Drop if RTSP server can't keep up
+
     def _queue_nal(self, nal_bytes: bytes) -> None:
-        """Queue a complete NAL unit for decoding."""
+        """Queue a complete NAL unit for decoding and optional RTSP fanout."""
         try:
             self._nal_queue.put_nowait(nal_bytes)
         except asyncio.QueueFull:
-            pass  # Drop oldest data if decoder can't keep up
+            pass  # Drop if PyAV decoder can't keep up
+        if self._rtsp_nal_queue is not None:
+            try:
+                self._rtsp_nal_queue.put_nowait(nal_bytes)
+            except asyncio.QueueFull:
+                pass  # Drop if RTSP server can't keep up
 
     async def _decode_loop(self) -> None:
         """Background task: decode H.264 NAL units to JPEG frames via PyAV.

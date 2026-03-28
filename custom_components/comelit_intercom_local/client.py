@@ -204,6 +204,35 @@ class IconaBridgeClient:
                                 "Channel %s assigned id=%d", ch.name, server_ch_id
                             )
                             break
+                elif msg_type == 0x01EF and len(body) >= 10:
+                    # Device-initiated channel close (END type, sub_type=2 in bytes 4-7).
+                    # Must ACK with type=4 response so device can re-open the channel.
+                    # PCAP-verified: app sends ef01 0400 04000000 [ch_id LE16] 0000.
+                    sub_type = struct.unpack_from("<I", body, 4)[0] if len(body) >= 8 else 0
+                    if sub_type == 2:
+                        ack_body = (
+                            struct.pack("<HH", 0x01EF, 4)     # END magic + seq=4
+                            + struct.pack("<I", 4)             # sub_type=4 (close ACK)
+                            + struct.pack("<H", server_ch_id)  # channel being closed
+                            + b"\x00\x00"                      # padding
+                        )
+                        ack_pkt = (
+                            b"\x00\x06"
+                            + struct.pack("<H", len(ack_body))
+                            + b"\x00\x00\x00\x00"
+                            + ack_body
+                        )
+                        if self._writer:
+                            self._writer.write(ack_pkt)
+                        _LOGGER.debug(
+                            "Sent close ACK for ch=0x%04X (device-initiated END)",
+                            server_ch_id,
+                        )
+                    else:
+                        _LOGGER.debug(
+                            "Device ACKed our close: ch=0x%04X sub_type=%d",
+                            server_ch_id, sub_type,
+                        )
                 else:
                     _LOGGER.debug(
                         "Non-COMMAND message type=0x%04X (not assigning)", msg_type

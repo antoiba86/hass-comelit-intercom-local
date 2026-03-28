@@ -7,6 +7,7 @@ from collections.abc import Callable
 import contextlib
 from datetime import timedelta
 import logging
+import time
 from typing import TypeAlias
 
 from homeassistant.config_entries import ConfigEntry
@@ -16,10 +17,11 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 from .auth import authenticate
 from .client import IconaBridgeClient
 from .config_reader import get_device_config
-from .const import DOMAIN, PREWARM_DELAY_SECONDS
+from .const import DOMAIN
 from .door import open_door
 from .models import DeviceConfig, Door, PushEvent
 from .push import register_push
+from .rtsp_server import LocalRtspServer
 from .video_call import VideoCallSession
 
 _LOGGER = logging.getLogger(__name__)
@@ -53,7 +55,8 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
         self._config: DeviceConfig | None = None
         self._video_session: VideoCallSession | None = None
         self._video_stopped_by_user: bool = False
-        self._prewarm_task: asyncio.Task[None] | None = None
+        self._rtsp_server: LocalRtspServer | None = None
+        self._rtsp_url: str | None = None
         # Use an insertion-ordered dict to track callbacks (value is always None).
         # This avoids ValueError on removal and preserves iteration order.
         self._push_callbacks: dict[Callable[[PushEvent], None], None] = {}
@@ -62,6 +65,16 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
     def device_config(self) -> DeviceConfig | None:
         """Return the current device configuration."""
         return self._config
+
+    @property
+    def rtsp_url(self) -> str | None:
+        """Return the persistent RTSP URL (available after setup)."""
+        return self._rtsp_url
+
+    @property
+    def rtsp_server(self) -> LocalRtspServer | None:
+        """Return the persistent RTSP server instance."""
+        return self._rtsp_server
 
     async def async_setup(self) -> None:
         """Connect, authenticate, fetch config, and register for push."""
@@ -76,6 +89,13 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
             raise
 
         self._client = client
+
+        # Start persistent RTSP server so go2rtc can connect immediately
+        if not self._rtsp_server:
+            rtsp = LocalRtspServer()
+            self._rtsp_url = await rtsp.start()
+            self._rtsp_server = rtsp
+            _LOGGER.info("Persistent RTSP server started: %s", self._rtsp_url)
 
         self.async_set_updated_data(self._config)
         _LOGGER.info(
@@ -111,8 +131,12 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
 
     async def async_shutdown(self) -> None:
         """Disconnect from the device."""
-        self._cancel_prewarm()
         await self.async_stop_video()
+        if self._rtsp_server:
+            with contextlib.suppress(Exception):
+                await self._rtsp_server.stop()
+            self._rtsp_server = None
+            self._rtsp_url = None
         if self._client:
             await self._client.disconnect()
             self._client = None
@@ -151,99 +175,27 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
 
         self._video_stopped_by_user = False
 
-        await self.async_stop_video()  # Also cancels prewarm
+        await self.async_stop_video()
 
+        t0 = time.monotonic()
+        _LOGGER.info("Video session starting (CTPP setup)")
         session = VideoCallSession(
             self.host, self.port, self.token, self._config,
             auto_timeout=auto_timeout,
+            rtsp_server=self._rtsp_server,
+            on_call_end=self._on_video_call_end,
         )
         await session.start()
+        _LOGGER.info("Video session ready in %.1fs", time.monotonic() - t0)
         self._video_session = session
-
-        # For long-running MJPEG streams (auto_timeout=False), schedule a
-        # pre-warm at t=25s so the next session is ready before CALL_END arrives
-        # (~30s). Establishment takes ~1.3s, leaving ~3.7s buffer.
-        if not auto_timeout:
-            self._prewarm_task = asyncio.create_task(self._prewarm_loop())
-
         return session
 
-    def _cancel_prewarm(self) -> None:
-        """Cancel the pre-warm task without awaiting it.
-
-        Not awaiting is intentional: awaiting a mid-establishment task blocks
-        for 14-18s while the TCP handshake times out. We fire cancel() and let
-        the task handle its own cleanup asynchronously.
-        """
-        task, self._prewarm_task = self._prewarm_task, None
-        if task and not task.done():
-            task.cancel()
-
-    def _stop_session_in_background(
-        self, session: VideoCallSession, label: str
-    ) -> None:
-        """Schedule a session stop in the background without blocking."""
-        async def _stop() -> None:
-            try:
-                await session.stop()
-            except Exception:
-                _LOGGER.debug("Error stopping %s session", label, exc_info=True)
-
-        asyncio.get_running_loop().create_task(_stop())
-
-    async def _prewarm_loop(self) -> None:
-        """Establish the next session at t=25s, then swap it in atomically."""
-        try:
-            await asyncio.sleep(PREWARM_DELAY_SECONDS)
-        except asyncio.CancelledError:
-            return  # Cancelled during sleep — nothing to clean up.
-
-        if self._video_stopped_by_user or not self._config:
-            return
-
-        _LOGGER.info("Pre-warming next video session")
-        new_session = VideoCallSession(
-            self.host, self.port, self.token, self._config,
-            auto_timeout=False,
-        )
-        try:
-            await new_session.start()
-        except asyncio.CancelledError:
-            self._stop_session_in_background(new_session, "cancelled pre-warm")
-            return
-        except Exception:
-            _LOGGER.warning(
-                "Pre-warm failed — will restart on CALL_END instead",
-                exc_info=True,
-            )
-            return
-
+    def _on_video_call_end(self) -> None:
+        """Called by VideoCallSession when the device sends CALL_END."""
         if self._video_stopped_by_user:
-            # User stopped video while we were establishing — discard new session.
-            await new_session.stop()
             return
-
-        # Wait for the new receiver to produce at least one frame before
-        # swapping, so camera.py never shows a placeholder during the switch.
-        new_receiver = new_session.rtp_receiver
-        if new_receiver:
-            first_frame = await new_receiver.get_jpeg_frame(timeout=3.0)
-            if not first_frame:
-                _LOGGER.warning("Pre-warm: new session produced no frames in 3s")
-
-        if self._video_stopped_by_user:
-            await new_session.stop()
-            return
-
-        # Atomic swap: camera.py will pick up the new session on its next frame.
-        old_session, self._video_session = self._video_session, new_session
-        _LOGGER.info("Switched to pre-warmed session seamlessly")
-
-        if old_session:
-            self._stop_session_in_background(old_session, "old")
-
-        # Schedule the next pre-warm for the new session (infinite cycling).
-        self._prewarm_task = asyncio.create_task(self._prewarm_loop())
+        _LOGGER.info("CALL_END received — scheduling session restart")
+        self.hass.async_create_task(self.async_start_video())
 
     @property
     def video_stopped_by_user(self) -> bool:
@@ -256,9 +208,8 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
 
     async def async_stop_video(self) -> None:
         """Stop the active video call session."""
-        self._cancel_prewarm()
         if self._video_session:
-            await self._video_session.stop()
+            await self._video_session.stop(reason="user stopped")
             self._video_session = None
 
     @property

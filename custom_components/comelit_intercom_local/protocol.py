@@ -259,6 +259,9 @@ ACTION_CALL_INIT = 0x0028
 ACTION_CODEC_NEG = 0x0008
 ACTION_RTPC_LINK = 0x000A
 ACTION_VIDEO_CONFIG = 0x001A
+ACTION_PEER = 0x0070       # "accept call" / peer (answer sequence msg 2)
+ACTION_CONFIG_ACK = 0x000C # supplemental config ACK (answer sequence msg 3)
+ACTION_HANGUP = 0x002D     # '-' = hangup
 
 
 def _build_ctpp_video_msg(
@@ -439,6 +442,112 @@ def encode_call_response_ack(
     buf += b"\xff\xff\xff\xff"
     buf += _null_terminated(caller)
     buf += callee.encode("ascii") + b"\x00\x00"
+    return bytes(buf)
+
+
+def encode_answer_video_reconfig(
+    caller: str,
+    apt_addr: str,
+    rtpc2_req_id: int,
+    timestamp: int,
+    width: int = 800,
+    height: int = 480,
+    fps: int = 16,
+) -> bytes:
+    """Encode answer sequence message 1: video config re-negotiate.
+
+    Identical to encode_video_config but callee is apt_addr (not entrance_addr).
+    PCAP-verified: prefix=0x1840, callee="SB000006" (apt_address without subaddress).
+    """
+    extra = bytearray()
+    extra += bytes([0x14, 0x32, 0x00, 0x00, 0x00, 0x00])
+    extra += struct.pack("<H", rtpc2_req_id)
+    extra += bytes([0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00])
+    extra += struct.pack("<H", width)
+    extra += struct.pack("<H", height)
+    extra += struct.pack("<H", 320)
+    extra += struct.pack("<H", 240)
+    extra += struct.pack("<H", fps)
+    extra += bytes([0x00, 0x00])
+    return _build_ctpp_video_msg(
+        prefix=0x1840,
+        timestamp=timestamp,
+        action=ACTION_VIDEO_CONFIG,
+        flags=0x0011,
+        caller=caller,
+        callee=apt_addr,
+        extra=bytes(extra),
+    )
+
+
+def encode_answer_peer(
+    caller: str,
+    apt_addr: str,
+    apt_subaddress: str,
+    timestamp: int,
+) -> bytes:
+    """Encode answer sequence message 2: peer/accept (action 0x70).
+
+    PCAP-verified wire format (48 bytes body):
+      [0x1840 LE16] [timestamp LE32] [inner_len BE16] [0x0070 BE16]
+      [apt_subaddress\\0] [0x01000000] [0xFFFFFFFF]
+      [caller\\0] [apt_addr\\0\\0]
+    inner_len = len(apt_subaddress\\0) + 4
+    """
+    inner_payload = apt_subaddress.encode("ascii") + b"\x00" + bytes([0x01, 0x00, 0x00, 0x00])
+    buf = bytearray()
+    buf += struct.pack("<H", 0x1840)
+    buf += struct.pack("<I", timestamp)
+    buf += struct.pack(">H", len(inner_payload))   # inner_len
+    buf += struct.pack(">H", ACTION_PEER)           # 0x0070
+    buf += inner_payload
+    buf += b"\xff\xff\xff\xff"
+    buf += _null_terminated(caller)
+    buf += apt_addr.encode("ascii") + b"\x00\x00"
+    return bytes(buf)
+
+
+def encode_answer_config_ack(
+    caller: str,
+    apt_addr: str,
+    timestamp: int,
+) -> bytes:
+    """Encode answer sequence message 3: supplemental config ACK (action 0x0c).
+
+    PCAP-verified wire format (36 bytes body):
+      [0x1840 LE16] [timestamp LE32] [0x0002 BE16] [0x000C BE16]
+      [0x0000] [0xFFFFFFFF] [caller\\0] [apt_addr\\0\\0]
+    """
+    buf = bytearray()
+    buf += struct.pack("<H", 0x1840)
+    buf += struct.pack("<I", timestamp)
+    buf += struct.pack(">H", 0x0002)               # inner_len = 2 (just the padding)
+    buf += struct.pack(">H", ACTION_CONFIG_ACK)    # 0x000C
+    buf += b"\x00\x00"                             # 2 bytes padding
+    buf += b"\xff\xff\xff\xff"
+    buf += _null_terminated(caller)
+    buf += apt_addr.encode("ascii") + b"\x00\x00"
+    return bytes(buf)
+
+
+def encode_hangup(
+    caller: str,
+    entrance_addr: str,
+    timestamp: int,
+) -> bytes:
+    """Encode hangup message (action 0x2d).
+
+    Sent to terminate the call. Body includes the entrance address
+    (e.g. "SB100001").
+    """
+    buf = bytearray()
+    buf += struct.pack("<H", 0x1830)
+    buf += struct.pack("<I", timestamp)
+    buf += struct.pack(">H", ACTION_HANGUP)
+    buf += entrance_addr.encode("ascii") + b"\x00"
+    buf += b"\xff\xff\xff\xff"
+    buf += _null_terminated(caller)
+    buf += entrance_addr.encode("ascii") + b"\x00\x00"
     return bytes(buf)
 
 

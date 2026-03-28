@@ -28,3 +28,5 @@ htmlcov/
 *.log
 
 docs/
+
+.claude
