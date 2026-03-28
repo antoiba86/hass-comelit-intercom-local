@@ -36,6 +36,8 @@ class TestCleanup:
         session._timeout_task = None
         session._tcp_task = None
         session._ctpp_task = None
+        session._rtsp_server = None
+        session._external_rtsp = False
 
         mock_receiver = MagicMock()
         mock_receiver.stop = AsyncMock(side_effect=RuntimeError("stop failed"))
@@ -62,6 +64,8 @@ class TestCleanup:
         session._client = None
         session._tcp_task = None
         session._ctpp_task = None
+        session._rtsp_server = None
+        session._external_rtsp = False
 
         cancelled = asyncio.Event()
 
@@ -89,6 +93,8 @@ class TestCleanup:
         session._client = None
         session._tcp_task = None
         session._timeout_task = None
+        session._rtsp_server = None
+        session._external_rtsp = False
 
         cancelled = asyncio.Event()
 
@@ -117,6 +123,8 @@ class TestCleanup:
         session._ctpp_task = None
         session._rtp_receiver = None
         session._client = None
+        session._rtsp_server = None
+        session._external_rtsp = False
 
         await session._cleanup()
         await session._cleanup()  # should not raise
@@ -131,6 +139,8 @@ class TestCleanup:
         session._ctpp_task = None
         session._rtp_receiver = None
         session._client = None
+        session._rtsp_server = None
+        session._external_rtsp = False
 
         await session.stop()  # should not raise
 
@@ -146,6 +156,8 @@ class TestCtppMonitorLoop:
         session._ctpp_task = None
         session._rtp_receiver = None
         session._client = None
+        session._rtsp_server = None
+        session._external_rtsp = False
         return session
 
     @pytest.mark.asyncio
@@ -176,7 +188,10 @@ class TestCtppMonitorLoop:
 
         mock_ctpp = MagicMock()
 
-        await session._ctpp_monitor_loop(mock_client, mock_ctpp, "SB0000061", "SB100001", 0x10000000)
+        await session._ctpp_monitor_loop(
+            mock_client, mock_ctpp, "SB0000061", "SB100001", 0x10000000,
+            rtpc1_server_id=0xABCD, media_req_id=0x1234,
+        )
 
         # An ACK (0x1800 prefix) should have been sent
         assert len(sent_data) == 1
@@ -184,29 +199,85 @@ class TestCtppMonitorLoop:
         assert prefix == 0x1800
 
     @pytest.mark.asyncio
-    async def test_ctpp_call_end_stops_session(self):
-        """0x1840/0x0003 CALL_END should ACK and set _active=False."""
+    async def test_ctpp_call_end_triggers_inline_reestablish(self):
+        """0x1840/0x0003 CALL_END should trigger _inline_reestablish, not stop session."""
         import struct
 
         session = self._make_session()
 
-        sent_data = []
-
         mock_client = MagicMock()
-        call_end_body = struct.pack("<H", 0x1840) + struct.pack("<I", 0x12345678) + struct.pack(">H", 0x0003)
+        call_end_body = (
+            struct.pack("<H", 0x1840)
+            + struct.pack("<I", 0x12345678)
+            + struct.pack(">H", 0x0003)
+        )
+        call_count = 0
 
         async def mock_read_response(channel, timeout=2.0):
-            return call_end_body
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return call_end_body
+            session._active = False
+            return None
 
         mock_client.read_response = mock_read_response
-        mock_client.send_binary = AsyncMock(side_effect=lambda ch, data: sent_data.append(data))
+        mock_client.send_binary = AsyncMock()
 
-        mock_ctpp = MagicMock()
+        reestablish_called = False
 
-        await session._ctpp_monitor_loop(mock_client, mock_ctpp, "SB0000061", "SB100001", 0x10000000)
+        async def mock_reestablish(*args, **kwargs):
+            nonlocal reestablish_called
+            reestablish_called = True
+            return 0x10000000  # return updated counter
 
-        assert session._active is False
-        assert len(sent_data) == 1  # exactly one ACK sent
+        session._inline_reestablish = mock_reestablish
+
+        await session._ctpp_monitor_loop(
+            mock_client, MagicMock(), "SB0000061", "SB100001", 0x10000000,
+            rtpc1_server_id=0xABCD, media_req_id=0x1234,
+        )
+
+        assert reestablish_called
+        # Session should still be active after successful re-establishment
+        # (loop ends only because mock_read_response set _active=False on next iteration)
+
+    @pytest.mark.asyncio
+    async def test_ctpp_call_end_reestablish_failure_keeps_loop_running(self):
+        """If _inline_reestablish raises, a warning is logged but the loop keeps running."""
+        import struct
+
+        session = self._make_session()
+
+        mock_client = MagicMock()
+        call_end_body = (
+            struct.pack("<H", 0x1840)
+            + struct.pack("<I", 0x12345678)
+            + struct.pack(">H", 0x0003)
+        )
+        call_count = 0
+
+        async def mock_read_response(channel, timeout=2.0):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return call_end_body
+            session._active = False
+            return None
+
+        mock_client.read_response = mock_read_response
+        mock_client.send_binary = AsyncMock()
+
+        async def failing_reestablish(*args, **kwargs):
+            raise RuntimeError("re-establish failed")
+
+        session._inline_reestablish = failing_reestablish
+
+        # Must not raise; loop exits on next read returning None
+        await session._ctpp_monitor_loop(
+            mock_client, MagicMock(), "SB0000061", "SB100001", 0x10000000,
+            rtpc1_server_id=0xABCD, media_req_id=0x1234,
+        )
 
     @pytest.mark.asyncio
     async def test_ctpp_device_acks_are_ignored(self):
@@ -231,6 +302,9 @@ class TestCtppMonitorLoop:
         mock_client.read_response = mock_read_response
         mock_client.send_binary = AsyncMock(side_effect=lambda ch, data: sent_data.append(data))
 
-        await session._ctpp_monitor_loop(mock_client, MagicMock(), "SB0000061", "SB100001", 0x10000000)
+        await session._ctpp_monitor_loop(
+            mock_client, MagicMock(), "SB0000061", "SB100001", 0x10000000,
+            rtpc1_server_id=0xABCD, media_req_id=0x1234,
+        )
 
         assert len(sent_data) == 0  # no response to device ACKs
