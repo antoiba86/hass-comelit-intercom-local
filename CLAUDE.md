@@ -61,7 +61,7 @@ uv pip install -e ".[dev]"
 PYTHONPATH=. uv run python -m pytest tests/test_protocol.py tests/test_client.py tests/test_rtp_receiver.py tests/test_rtsp_server.py tests/test_video_call.py tests/test_video_signaling.py tests/test_camera.py tests/test_coordinator.py -v
 
 # Run integration tests (requires real device on LAN)
-COMELIT_HOST=192.168.31.201 COMELIT_TOKEN=<token> uv run python -m pytest tests/test_integration.py -v -s
+COMELIT_HOST=192.168.1.111 COMELIT_TOKEN=<token> uv run python -m pytest tests/test_integration.py -v -s
 ```
 
 ## ICONA Bridge Protocol
@@ -137,7 +137,7 @@ Entity IDs are persisted in HA's entity registry by `unique_id`. If upgrading fr
 
 ## Testing Device
 
-- IP: `192.168.31.201`, HTTP port: `8080`, ICONA port: `64100`
+- IP: `192.168.1.111`, HTTP port: `8080`, ICONA port: `64100`
 - Credentials: `admin` / `comelit`
 - Config: apt_address=SB000006, apt_subaddress=1, 2 doors, 0 cameras
 

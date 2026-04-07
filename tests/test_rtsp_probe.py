@@ -7,7 +7,7 @@ Requires: pip install opencv-python-headless
 import socket
 import sys
 
-DEVICE_IP = "192.168.31.201"
+DEVICE_IP = "192.168.1.111"
 RTSP_PORTS = [554, 8554, 8080, 64100]
 RTSP_PATHS = [
     "/ch01.264",

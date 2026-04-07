@@ -22,7 +22,7 @@ from custom_components.comelit_intercom_local.rtp_receiver import RtpReceiver, _
 logging.basicConfig(level=logging.DEBUG, format="%(asctime)s %(name)s %(message)s")
 _LOGGER = logging.getLogger(__name__)
 
-HOST = os.environ.get("COMELIT_HOST", "192.168.31.201")
+HOST = os.environ.get("COMELIT_HOST", "192.168.1.111")
 TOKEN = os.environ.get("COMELIT_TOKEN", "")
 PORT = 64100
 CALLEE = "SB100001"
