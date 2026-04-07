@@ -25,7 +25,7 @@ custom_components/comelit_intercom_local/
   camera_utils.py    — Camera/RTSP URL discovery
   video_call.py      — Video call signaling + answer sequence + inline re-establishment
   rtp_receiver.py    — UDP/TCP RTP receiver: H.264 FU-A→PyAV→JPEG + PCMA audio routing
-  rtsp_server.py     — Local RTSP server: H.264 + PCMA → go2rtc → WebRTC (multi-client)
+  rtsp_server.py     — Local RTSP server: H.264 + PCMA → HA stream integration (multi-client)
   models.py          — Data models (Door, Camera, DeviceConfig, PushEvent)
   exceptions.py      — Custom exceptions
   const.py           — Constants (domain, platforms, defaults)
@@ -111,7 +111,7 @@ Entity IDs are persisted in HA's entity registry by `unique_id`. If upgrading fr
 
 - `video_call.py` handles TCP signaling: CTPP → call init → UDPM → codec → 2x RTPC → link → video config
 - `rtp_receiver.py` handles UDP reception: ICONA header → RTP → H.264 FU-A → PyAV decode → JPEG; NAL queue carries `(rtp_ts, nal_bytes)` tuples
-- `rtsp_server.py` serves H.264 + G.711 PCMA over local RTSP (TCP interleaved) for go2rtc → WebRTC; monotonic timestamps rebased across calls
+- `rtsp_server.py` serves H.264 + G.711 PCMA over local RTSP (TCP interleaved) for HA stream integration; monotonic timestamps rebased across calls
 - Video config sends resolution 800×480 at 25 FPS
 - Auto-starts on `doorbell_ring` push event; manual start via "Start Video" button or Lovelace card play button
 - **Persistent RTSP server** owned by coordinator — started at HA setup, never stopped between calls; `stream_source()` always returns a valid URL

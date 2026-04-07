@@ -311,13 +311,13 @@ class TestLifecycle:
             await server.stop()
 
     @pytest.mark.asyncio
-    async def test_udp_sockets_bind_to_wildcard(self):
-        """UDP sockets bind to 0.0.0.0 to receive RTP from the device on any interface."""
+    async def test_udp_sockets_bind_to_bind_host(self):
+        """UDP sockets bind to bind_host, not all interfaces."""
         server = LocalRtspServer(bind_host="127.0.0.1")
         await server.start()
         try:
-            assert server._video_sock.getsockname()[0] == "0.0.0.0"
-            assert server._audio_sock.getsockname()[0] == "0.0.0.0"
+            assert server._video_sock.getsockname()[0] == "127.0.0.1"
+            assert server._audio_sock.getsockname()[0] == "127.0.0.1"
         finally:
             await server.stop()
 

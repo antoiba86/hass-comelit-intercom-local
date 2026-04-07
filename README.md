@@ -5,7 +5,7 @@ Home Assistant custom component for the **Comelit 6701W** WiFi video intercom. C
 ## Features
 
 - **Remote door opening** — open doors/gates from Home Assistant
-- **Live intercom video** — view the door camera stream directly in HA dashboards via go2rtc/WebRTC
+- **Live intercom video** — view the door camera stream directly in HA dashboards via local RTSP
 - **Doorbell events** — automations trigger on ring or missed call
 - **Custom Lovelace card** — play-button UI auto-registered on startup; starts video on click, stops on navigation away
 - **100% local** — all communication stays on your LAN, no cloud required
@@ -44,7 +44,7 @@ Home Assistant custom component for the **Comelit 6701W** WiFi video intercom. C
 | `button.comelit_intercom_<door_name>` | Press to open a door or gate (e.g., `button.comelit_intercom_actuator`) |
 | `button.comelit_intercom_start_video_feed` | Manually start the intercom video call |
 | `button.comelit_intercom_stop_video_feed` | Stop the active video call |
-| `camera.comelit_intercom_live_feed` | Live video stream from the door panel (WebRTC via go2rtc). Auto-starts on doorbell ring. |
+| `camera.comelit_intercom_live_feed` | Live video stream from the door panel via local RTSP. Auto-starts on doorbell ring. |
 | `camera.comelit_intercom_<name>` | RTSP stream from each additional configured camera |
 | `event.comelit_intercom_doorbell` | Fires `doorbell_ring` and `missed_call` events for automations |
 
