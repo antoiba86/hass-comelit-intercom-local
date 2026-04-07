@@ -237,33 +237,40 @@ class TestAnswerSequencePayloads:
         assert struct.pack("<I", ts) in msg
 
     def test_encode_answer_peer_prefix(self):
-        """encode_answer_peer uses 0x1840 prefix."""
-        msg = encode_answer_peer("SB0000061", "SB000006", "1", 0x12345678)
+        """encode_answer_peer uses 0x1840 prefix for initial call."""
+        msg = encode_answer_peer("SB0000061", "SB000006", 0x12345678)
         prefix = struct.unpack_from("<H", msg, 0)[0]
         assert prefix == 0x1840
 
+    def test_encode_answer_peer_renewal_prefix(self):
+        """encode_answer_peer uses 0x1860 prefix when renewal=True."""
+        msg = encode_answer_peer("SB0000061", "SB000006", 0x12345678, renewal=True)
+        prefix = struct.unpack_from("<H", msg, 0)[0]
+        assert prefix == 0x1860
+
     def test_encode_answer_peer_action(self):
         """encode_answer_peer uses ACTION_PEER (0x0070) at offset 8."""
-        msg = encode_answer_peer("SB0000061", "SB000006", "1", 0x12345678)
+        msg = encode_answer_peer("SB0000061", "SB000006", 0x12345678)
         action = struct.unpack_from(">H", msg, 8)[0]
         assert action == ACTION_PEER
 
-    def test_encode_answer_peer_contains_subaddress(self):
-        """encode_answer_peer embeds apt_subaddress null-terminated."""
-        msg = encode_answer_peer("SB0000061", "SB000006", "1", 0x12345678)
-        assert b"1\x00" in msg
+    def test_encode_answer_peer_contains_caller(self):
+        """encode_answer_peer embeds caller address null-terminated in inner payload."""
+        msg = encode_answer_peer("SB0000061", "SB000006", 0x12345678)
+        assert b"SB0000061\x00" in msg
 
     def test_encode_answer_peer_contains_marker(self):
         """encode_answer_peer contains 0xFFFFFFFF separator."""
-        msg = encode_answer_peer("SB0000061", "SB000006", "1", 0x12345678)
+        msg = encode_answer_peer("SB0000061", "SB000006", 0x12345678)
         assert b"\xff\xff\xff\xff" in msg
 
     def test_encode_answer_peer_inner_len_matches_payload(self):
-        """encode_answer_peer inner_len == len(apt_subaddress\\0) + 4."""
-        subaddr = "12"
-        msg = encode_answer_peer("SB0000061", "SB000006", subaddr, 0x12345678)
+        """encode_answer_peer inner_len == 2 (action) + len(caller\\0 + flag)."""
+        caller = "SB0000061"
+        msg = encode_answer_peer(caller, "SB000006", 0x12345678)
         inner_len = struct.unpack_from(">H", msg, 6)[0]
-        expected = len(subaddr.encode("ascii") + b"\x00") + 4
+        # inner_len = action (2 bytes) + caller\0 (len+1) + flag (2 bytes)
+        expected = 2 + len(caller.encode("ascii")) + 1 + 2
         assert inner_len == expected
 
     def test_encode_answer_config_ack_prefix(self):
@@ -273,7 +280,7 @@ class TestAnswerSequencePayloads:
         assert prefix == 0x1840
 
     def test_encode_answer_config_ack_action(self):
-        """encode_answer_config_ack uses ACTION_CONFIG_ACK (0x000C) at offset 8."""
+        """encode_answer_config_ack uses ACTION_CONFIG_ACK (0x000E) at offset 8."""
         msg = encode_answer_config_ack("SB0000061", "SB000006", 0x12345678)
         action = struct.unpack_from(">H", msg, 8)[0]
         assert action == ACTION_CONFIG_ACK

@@ -55,6 +55,13 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
         self._config: DeviceConfig | None = None
         self._video_session: VideoCallSession | None = None
         self._video_stopped_by_user: bool = False
+        # Prevents concurrent async_start_video calls from racing each other.
+        # The device can only handle one CTPP negotiation at a time; a second
+        # concurrent call would conflict and fail ~35s later with a UDPM timeout.
+        self._video_start_lock: asyncio.Lock = asyncio.Lock()
+        # Fires when a video session becomes ready — allows stream_source()
+        # to wait briefly instead of returning None while CTPP is in flight.
+        self._video_ready_event: asyncio.Event = asyncio.Event()
         self._rtsp_server: LocalRtspServer | None = None
         self._rtsp_url: str | None = None
         # Use an insertion-ordered dict to track callbacks (value is always None).
@@ -169,26 +176,49 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
     async def async_start_video(
         self, auto_timeout: bool = True
     ) -> VideoCallSession:
-        """Start a video call session."""
+        """Start a video call session.
+
+        Concurrent calls are dropped — the device can only negotiate one
+        CTPP session at a time and a second concurrent start would conflict
+        with the first and fail ~35 s later with a UDPM timeout.
+        """
         if not self._config:
             raise RuntimeError("Not configured")
 
-        self._video_stopped_by_user = False
+        if self._video_start_lock.locked():
+            _LOGGER.debug("Video start already in progress — skipping duplicate call")
+            if self._video_session:
+                return self._video_session
+            raise RuntimeError("Video start already in progress")
 
-        await self.async_stop_video()
+        async with self._video_start_lock:
+            self._video_stopped_by_user = False
+            await self.async_stop_video()
 
-        t0 = time.monotonic()
-        _LOGGER.info("Video session starting (CTPP setup)")
-        session = VideoCallSession(
-            self.host, self.port, self.token, self._config,
-            auto_timeout=auto_timeout,
-            rtsp_server=self._rtsp_server,
-            on_call_end=self._on_video_call_end,
-        )
-        await session.start()
-        _LOGGER.info("Video session ready in %.1fs", time.monotonic() - t0)
-        self._video_session = session
-        return session
+            t0 = time.monotonic()
+            _LOGGER.info("Video session starting (CTPP setup)")
+            session = VideoCallSession(
+                self.host, self.port, self.token, self._config,
+                auto_timeout=auto_timeout,
+                rtsp_server=self._rtsp_server,
+                on_call_end=self._on_video_call_end,
+            )
+            # Publish the session ONLY after start() has completed its
+            # readiness gate (first real NAL queued).  Publishing earlier
+            # lets HA's stream worker open the RTSP URL while CTPP is
+            # still negotiating — it probes a video-less stream, stalls,
+            # and takes ~20 s extra to recover once real NALs finally
+            # arrive.  The trade-off is a cosmetic "camera does not
+            # support play stream service" error logged by Lovelace at
+            # the ~2 s mark, because `stream_source()` returns None while
+            # CTPP is in flight.  go2rtc's WebRTC path queries the URL
+            # through a different code path and is not affected, so the
+            # user-visible latency stays at ~3 s.
+            await session.start()
+            _LOGGER.info("Video session ready in %.1fs", time.monotonic() - t0)
+            self._video_session = session
+            self._video_ready_event.set()
+            return session
 
     def _on_video_call_end(self) -> None:
         """Called by VideoCallSession when the device sends CALL_END."""
@@ -211,6 +241,7 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
         if self._video_session:
             await self._video_session.stop(reason="user stopped")
             self._video_session = None
+            self._video_ready_event.clear()
 
     @property
     def video_session(self) -> VideoCallSession | None:

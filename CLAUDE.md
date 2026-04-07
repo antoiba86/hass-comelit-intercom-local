@@ -7,12 +7,12 @@ Home Assistant custom component for the **Comelit 6701W** WiFi video intercom. C
 ## Project Structure
 
 ```
-custom_components/comelit_local/
-  __init__.py        — HA integration setup (async_setup_entry)
+custom_components/comelit_intercom_local/
+  __init__.py        — HA integration setup; registers card JS static path + Lovelace resource
   config_flow.py     — UI config flow with auto token extraction
   coordinator.py     — DataUpdateCoordinator (manages TCP connection + persistent RTSP server)
-  button.py          — Door open button entities
-  camera.py          — Camera entities (video stream; stream_source always returns RTSP URL)
+  button.py          — Door open + Start/Stop video button entities
+  camera.py          — Camera entities (intercom video gated on _video_ready_event; RTSP cameras)
   event.py           — Doorbell ring / missed call event entities
   protocol.py        — Wire protocol: 8-byte header, message types, binary payloads
   channels.py        — Channel definitions (UAUT, UCFG, CTPP, PUSH)
@@ -29,13 +29,20 @@ custom_components/comelit_local/
   models.py          — Data models (Door, Camera, DeviceConfig, PushEvent)
   exceptions.py      — Custom exceptions
   const.py           — Constants (domain, platforms, defaults)
+  www/
+    comelit-intercom-card.js — Custom Lovelace card (play-button UI, auto-stop on navigation)
 
 tests/
-  test_protocol.py   — Unit tests for wire protocol
-  test_client.py     — Unit tests for TCP client
-  test_integration.py — Integration tests (requires real device)
-  test_ha_component.py — HA component tests
-  conftest.py        — Shared fixtures
+  test_protocol.py        — Unit tests for wire protocol
+  test_client.py          — Unit tests for TCP client
+  test_rtp_receiver.py    — Unit tests for RTP receiver
+  test_rtsp_server.py     — Unit tests for RTSP server
+  test_video_call.py      — Unit tests for video call session
+  test_video_signaling.py — Unit tests for video signaling protocol
+  test_camera.py          — Unit tests for camera entity
+  test_coordinator.py     — Unit tests for coordinator
+  test_integration.py     — Integration tests (requires real device)
+  conftest.py             — Shared fixtures
 
 postman/             — Postman collection documenting HTTP + TCP requests
 ```
@@ -51,7 +58,7 @@ postman/             — Postman collection documenting HTTP + TCP requests
 uv pip install -e ".[dev]"
 
 # Run unit tests (no device needed)
-PYTHONPATH=. uv run python -m pytest tests/test_protocol.py tests/test_client.py -v
+PYTHONPATH=. uv run python -m pytest tests/test_protocol.py tests/test_client.py tests/test_rtp_receiver.py tests/test_rtsp_server.py tests/test_video_call.py tests/test_video_signaling.py tests/test_camera.py tests/test_coordinator.py -v
 
 # Run integration tests (requires real device on LAN)
 COMELIT_HOST=192.168.31.201 COMELIT_TOKEN=<token> uv run python -m pytest tests/test_integration.py -v -s
@@ -84,34 +91,42 @@ All communication is raw TCP on port **64100**. Every message has an 8-byte head
 
 ## Key Entities
 
+All entities use `_attr_has_entity_name = True` with device name `"Comelit Intercom"`, so entity IDs include the device prefix on fresh installs:
+
 | Entity | Description |
 |--------|-------------|
-| `button.<door_name>` | Press to open door/gate |
-| `event.doorbell` | Fires `doorbell_ring` and `missed_call` events |
-| `camera.intercom_video` | Live video stream from intercom |
-| `button.start_video` | Manually trigger video call |
+| `button.comelit_intercom_<door_name>` | Press to open door/gate — linked to main intercom device |
+| `event.comelit_intercom_doorbell` | Fires `doorbell_ring` and `missed_call` events |
+| `camera.comelit_intercom_live_feed` | Live video stream from intercom |
+| `button.comelit_intercom_start_video_feed` | Manually trigger video call |
+| `button.comelit_intercom_stop_video_feed` | Stop active video call |
 
 ### Entity ID Note
 
 Door `id` from device can be non-unique (e.g., both doors had id=0). The `index` field on the Door model is a sequential counter used for unique entity IDs.
 
+Entity IDs are persisted in HA's entity registry by `unique_id`. If upgrading from an older version with different IDs (e.g., `camera.intercom_video`), delete and re-add the integration or rename manually in Settings → Entities.
+
 ## Video Streaming
 
 - `video_call.py` handles TCP signaling: CTPP → call init → UDPM → codec → 2x RTPC → link → video config
-- `rtp_receiver.py` handles UDP reception: ICONA header → RTP → H.264 FU-A → PyAV decode → JPEG
-- `rtsp_server.py` serves H.264 + G.711 PCMA over local RTSP (TCP interleaved) for go2rtc → WebRTC
-- Video config sends resolution 800x480 at 16 FPS
-- Auto-starts on `doorbell_ring` push event; manual start via "Start Video" button
+- `rtp_receiver.py` handles UDP reception: ICONA header → RTP → H.264 FU-A → PyAV decode → JPEG; NAL queue carries `(rtp_ts, nal_bytes)` tuples
+- `rtsp_server.py` serves H.264 + G.711 PCMA over local RTSP (TCP interleaved) for go2rtc → WebRTC; monotonic timestamps rebased across calls
+- Video config sends resolution 800×480 at 25 FPS
+- Auto-starts on `doorbell_ring` push event; manual start via "Start Video" button or Lovelace card play button
 - **Persistent RTSP server** owned by coordinator — started at HA setup, never stopped between calls; `stream_source()` always returns a valid URL
+- **`_video_ready_event`** (asyncio.Event) gates `stream_source()` — returns None until session is ready, preventing HA stream worker from probing an empty stream during CTPP negotiation
+- **`_video_start_lock`** (asyncio.Lock) in coordinator prevents concurrent `async_start_video` calls — second concurrent call is immediately rejected with RuntimeError
 - **Inline re-establishment** on CALL_END (~30s): ACK → refresh RTPC_LINK → VIDEO_CONFIG_RESP — no TCP reconnect, video is uninterrupted
+- Video falls back to TCP transport (RTPC2) if UDP is blocked by NAT/firewall
 
-## Audio Streaming (implemented 2026-03-25)
+## Audio Streaming
 
 - Audio does **NOT** start automatically — device requires an explicit "answer" sequence after video starts
 - **Answer sequence** (sent as background task after video is flowing, non-fatal):
-  1. `encode_answer_video_reconfig` — prefix `0x183C`, resends 800×480 @ 16fps
-  2. `encode_answer_peer` — prefix `0x1830`, action `0x70`, carries `apt_subaddress`
-  3. `encode_answer_config_ack` — prefix `0x180C`, action `0x0C`
+  1. `encode_answer_video_reconfig` — prefix `0x183C`, resends 800×480 @ 25fps
+  2. `encode_answer_peer` — prefix `0x1830` (or `0x1860` for renewal), action `0x70`, signature: `(caller, entrance_addr, timestamp, renewal=False)`
+  3. `encode_answer_config_ack` — prefix `0x180C`, action `0x000E`
 - Device responds by opening a new RTPC channel; audio flows ~3.5s later
 - **Audio codec: PCMA G.711 A-law, PT=8, 20ms frames (160 bytes/frame)**
 - Audio arrives on same UDP port as video, distinguished by RTP payload type (PT=8)
@@ -126,13 +141,28 @@ Door `id` from device can be non-unique (e.g., both doors had id=0). The `index`
 - Credentials: `admin` / `comelit`
 - Config: apt_address=SB000006, apt_subaddress=1, 2 doors, 0 cameras
 
+## Lovelace Card
+
+A custom Lovelace card (`www/comelit-intercom-card.js`) is automatically registered on HA startup:
+
+- **Static path** registered at `/comelit_intercom_local/comelit-intercom-card.js` (version-aware, uses `StaticPathConfig` for HA 2024.7+)
+- **Lovelace resource** auto-registered with versioned URL (`?v=<manifest version>`) — updates automatically on version bump
+- **Card config** (YAML):
+  ```yaml
+  type: custom:comelit-intercom-card
+  camera_entity: camera.comelit_intercom_live_feed
+  start_entity: button.comelit_intercom_start_video_feed  # optional
+  stop_entity: button.comelit_intercom_stop_video_feed
+  ```
+- **UI behaviour**: shows camera snapshot with play button overlay; click to start video. Live view uses `hui-picture-entity-card` (created via `window.loadCardHelpers()` to ensure element is upgraded before `setConfig`). Stops video on navigation away (`location-changed` + `getBoundingClientRect()` visibility check) or DOM removal.
+
 ## HA Debug Logging
 
 ```yaml
 logger:
   default: info
   logs:
-    custom_components.comelit_local: debug
+    custom_components.comelit_intercom_local: debug
 ```
 
 ## Workflow Preferences

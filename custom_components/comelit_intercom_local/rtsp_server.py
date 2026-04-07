@@ -31,6 +31,7 @@ Audio keepalive:
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import dataclasses
 import logging
@@ -41,6 +42,17 @@ _LOGGER = logging.getLogger(__name__)
 
 _MAX_RTP_PAYLOAD = 1400  # bytes — safe MTU headroom
 _PCMA_SILENCE = bytes([0xD5] * 160)  # 20ms G.711 A-law silence
+
+# H.264 parameter sets captured from the Comelit 6701W (baseline profile,
+# level 3.1, 800x480 yuv420p — identical across every pcap we have).  Used as
+# a fallback sprop-parameter-sets in the SDP so that clients which DESCRIBE
+# before the first live SPS/PPS have arrived (notably HA's `stream` worker,
+# which connects to the persistent RTSP server at HA startup — long before
+# the first video call) still get a codec context with a known pix_fmt.
+# Without this, PyAV's `add_stream_from_template` fails with
+# `libx264 Invalid video pixel format: -1` on the first keyframe.
+_DEFAULT_SPS = bytes.fromhex("6742001fe90283f402c4084a")
+_DEFAULT_PPS = bytes.fromhex("68ce3880")
 
 
 @dataclasses.dataclass
@@ -72,9 +84,14 @@ class LocalRtspServer:
         self._rtsp_port: int = 0
         self._server: asyncio.Server | None = None
 
-        # Incoming media queues — attached to rtp_receiver via attach_rtsp_queues
-        self.nal_queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=300)
+        # Incoming media queues — attached to rtp_receiver via attach_rtsp_queues.
+        # Video queue carries (device_rtp_timestamp, nal_bytes) tuples so the
+        # device's own 90 kHz PTS flows end-to-end instead of being fabricated.
+        self.nal_queue: asyncio.Queue[tuple[int, bytes]] = asyncio.Queue(maxsize=300)
         self.audio_queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=500)
+        # RTP pass-through queue: raw video RTP packets forwarded with
+        # header rewrite only (no NAL reassembly / FU-A re-fragmentation).
+        self.rtp_queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=500)
 
         # UDP sockets — fallback for clients that request UDP transport
         self._video_sock: socket.socket | None = None
@@ -89,11 +106,34 @@ class LocalRtspServer:
         # Active TCP clients — appended on PLAY, removed on disconnect
         self._active_clients: list[_TcpClient] = []
 
-        # RTP sequence / timestamp state (shared across all clients)
+        # Latest SPS/PPS bytes seen in the NAL stream (without start code).
+        # Used to populate sprop-parameter-sets in SDP so clients know the
+        # pixel format before the first keyframe arrives.  Preserved across
+        # reset() so later DESCRIBEs benefit from past sessions.
+        self._latest_sps: bytes = _DEFAULT_SPS
+        self._latest_pps: bytes = _DEFAULT_PPS
+
+        # RTP sequence numbers (shared across all clients).  MUST advance
+        # monotonically for the lifetime of the server.
         self._video_seq: int = 0
         self._audio_seq: int = 0
-        self._video_ts: int = 0
         self._audio_ts: int = 0
+
+        # Video timestamp translation: the device resets its RTP timestamp
+        # per call, but the persistent HA stream worker stays connected
+        # across calls and rejects backwards jumps as "Timestamp
+        # discontinuity".  We translate device_ts → output_ts by adding a
+        # running offset that is recalculated on each new call to keep the
+        # output stream monotonic and aligned with wall clock.
+        self._video_ts_out: int = 0          # last output timestamp sent
+        self._video_ts_offset: int = 0       # device_ts + offset = output_ts
+        self._last_device_ts: int | None = None  # last device_ts seen
+        # Explicit "rebase on next frame" flag.  Set by reset() to force
+        # the feed loop to recompute the offset on the next device NAL
+        # regardless of what device_ts looks like — we cannot rely on the
+        # backward-jump heuristic because the device may restart from a
+        # higher number than it ended at.
+        self._video_ts_rebase_pending: bool = False
         self._video_ssrc: int = 0xC0DE1234
         self._audio_ssrc: int = 0xA0D10001
         self._session_id: str = "87654321"
@@ -113,11 +153,11 @@ class LocalRtspServer:
         Feed tasks run until stop() — they broadcast to whoever is registered.
         """
         self._video_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self._video_sock.bind((self._bind_host, 0))
+        self._video_sock.bind(("0.0.0.0", 0))
         self._video_server_port = self._video_sock.getsockname()[1]
 
         self._audio_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self._audio_sock.bind((self._bind_host, 0))
+        self._audio_sock.bind(("0.0.0.0", 0))
         self._audio_server_port = self._audio_sock.getsockname()[1]
 
         self._server = await asyncio.start_server(
@@ -128,9 +168,11 @@ class LocalRtspServer:
         self._rtsp_port = self._server.sockets[0].getsockname()[1]
         self._running = True
 
-        # Persistent feed tasks — run for the lifetime of the server
+        # Persistent feed tasks — run for the lifetime of the server.
+        # Passthrough loop is lower latency; falls back to NAL-based
+        # path automatically if rtp_queue is not fed.
         self._feed_tasks = [
-            asyncio.create_task(self._video_feed_loop()),
+            asyncio.create_task(self._video_rtp_passthrough_loop()),
             asyncio.create_task(self._audio_feed_loop()),
         ]
 
@@ -166,34 +208,51 @@ class LocalRtspServer:
     def reset(self, renewal: bool = False) -> None:
         """Reset for a new or renewed video call session.
 
-        Always drains stale media from existing queues (drain not replace, so
-        RtpReceiver keeps pushing to the same queue objects the feed loops read).
-
-        renewal=False (new call): also resets RTP counters to 0 — go2rtc may
-            have reconnected and expects a fresh stream.
-        renewal=True (re-establishment): preserves RTP seq/ts so they increment
-            monotonically — go2rtc stays connected and won't see a backwards
-            timestamp jump ("Timestamp discontinuity").
+        Drains stale media from existing queues (drain not replace, so
+        RtpReceiver keeps pushing to the same queue objects the feed loops
+        read).  NEVER resets RTP sequence/timestamp counters — the persistent
+        HA stream worker stays connected across calls and any backwards jump
+        causes a "Timestamp discontinuity" error.  `renewal` is kept for
+        backwards compatibility with callers but no longer changes behaviour.
         """
         drained_nal = 0
         while not self.nal_queue.empty():
             with contextlib.suppress(asyncio.QueueEmpty):
                 self.nal_queue.get_nowait()
                 drained_nal += 1
+        while not self.rtp_queue.empty():
+            with contextlib.suppress(asyncio.QueueEmpty):
+                self.rtp_queue.get_nowait()
+                drained_nal += 1
         drained_audio = 0
         while not self.audio_queue.empty():
             with contextlib.suppress(asyncio.QueueEmpty):
                 self.audio_queue.get_nowait()
                 drained_audio += 1
-        if not renewal:
-            self._video_seq = 0
-            self._audio_seq = 0
-            self._video_ts = 0
-            self._audio_ts = 0
+        # Audio–video sync bootstrap: the audio feed loop has been advancing
+        # `_audio_ts` by 160 per 20 ms of silence since server start, so by
+        # the time the first video frame of a new call arrives, audio is N
+        # seconds ahead on the muxer's output timeline.  Without correction
+        # the first video output timestamp would be 0 (or a small device
+        # value), leaving HA's stream worker to reconcile the gap by
+        # stalling 20+ s until its buffers catch up.  Seed `_video_ts_out`
+        # to the current audio clock converted to 90 kHz so the feed loop's
+        # next frame lands right next to "now", and set an explicit rebase
+        # flag so the loop knows to recompute the offset on the next NAL
+        # regardless of the device's own timestamp value.
+        audio_ts_90k = (self._audio_ts * 90000 // 8000) & 0xFFFFFFFF
+        # Use whichever is higher: the audio clock (needed on first call
+        # when _video_ts_out is 0) or the real last video output (needed
+        # on renewal when video timestamps have advanced past the audio
+        # clock).  Using the audio clock alone caused backward jumps on
+        # renewal because the audio clock lags behind the video stream.
+        self._video_ts_out = max(self._video_ts_out, audio_ts_90k)
+        self._video_ts_rebase_pending = True
         _LOGGER.debug(
             "RTSP server reset (renewal=%s): drained %d NALs + %d audio, "
-            "%d client(s) remain",
-            renewal, drained_nal, drained_audio, len(self._active_clients),
+            "%d client(s) remain, video_ts_out seeded to 0x%08X",
+            renewal, drained_nal, drained_audio,
+            len(self._active_clients), self._video_ts_out,
         )
 
     # ------------------------------------------------------------------
@@ -207,6 +266,12 @@ class LocalRtspServer:
         peer = writer.get_extra_info("peername")
         client_host = peer[0] if peer else "unknown"
         _LOGGER.debug("RTSP client connected from %s", client_host)
+
+        # Disable Nagle's algorithm — send RTP packets immediately
+        # instead of batching them (adds up to 40ms latency per packet)
+        sock = writer.get_extra_info("socket")
+        if sock is not None:
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
 
         # Per-client state — independent of every other connection
         client = _TcpClient(writer=writer)
@@ -280,6 +345,13 @@ class LocalRtspServer:
                         client_host, client.video_ch, client.audio_ch,
                         len(self._active_clients),
                     )
+                    # Immediately send in-band SPS + PPS to this client so
+                    # FFmpeg's H.264 parser populates codecpar.format before
+                    # the stream worker freezes its output template.  Without
+                    # this, sprop-parameter-sets from SDP alone is not always
+                    # enough — recent libavformat only reliably sets pix_fmt
+                    # from in-band NAL units seen in the actual RTP stream.
+                    self._prime_client_with_parameter_sets(client)
                     await self._wait_for_teardown(reader)
                     break
 
@@ -357,6 +429,10 @@ class LocalRtspServer:
         return 0
 
     def _build_sdp(self) -> str:
+        sps_b64 = base64.b64encode(self._latest_sps).decode()
+        pps_b64 = base64.b64encode(self._latest_pps).decode()
+        # profile-level-id = first 3 bytes of SPS (profile_idc, constraints, level_idc)
+        profile_level_id = self._latest_sps[1:4].hex()
         return (
             "v=0\r\n"
             f"o=- 0 0 IN IP4 {self._bind_host}\r\n"
@@ -365,7 +441,9 @@ class LocalRtspServer:
             "m=video 0 RTP/AVP 96\r\n"
             "c=IN IP4 0.0.0.0\r\n"
             "a=rtpmap:96 H264/90000\r\n"
-            "a=fmtp:96 packetization-mode=1\r\n"
+            f"a=fmtp:96 packetization-mode=1;"
+            f"profile-level-id={profile_level_id};"
+            f"sprop-parameter-sets={sps_b64},{pps_b64}\r\n"
             "a=control:video\r\n"
             "m=audio 0 RTP/AVP 8\r\n"
             "c=IN IP4 0.0.0.0\r\n"
@@ -387,15 +465,68 @@ class LocalRtspServer:
     # RTP broadcast
     # ------------------------------------------------------------------
 
+    def _prime_client_with_parameter_sets(self, client: _TcpClient) -> None:
+        """Send SPS + PPS as in-band RTP packets to a freshly-registered client.
+
+        FFmpeg's RTSP demuxer does not always populate codecpar.format from
+        sprop-parameter-sets in the SDP — some versions only set pix_fmt
+        after seeing an in-band SPS NAL in the RTP stream.  HA's stream
+        worker captures codecpar.format at stream-open time and uses it to
+        open libx264; if pix_fmt is unset at that moment, libx264 fails
+        with "Invalid video pixel format: -1" on the first keyframe.
+        Sending the cached SPS+PPS right after PLAY avoids that race.
+        """
+        if client.video_ch is None:
+            return
+        for nal in (self._latest_sps, self._latest_pps):
+            if not nal:
+                continue
+            pkt = _build_rtp(
+                pt=96, seq=self._video_seq, ts=self._video_ts_out,
+                ssrc=self._video_ssrc, payload=nal, marker=False,
+            )
+            self._video_seq = (self._video_seq + 1) & 0xFFFF
+            try:
+                client.writer.write(
+                    struct.pack("!BBH", 0x24, client.video_ch, len(pkt)) + pkt
+                )
+            except Exception:
+                _LOGGER.debug("Failed to prime client with parameter sets", exc_info=True)
+                return
+        _LOGGER.debug(
+            "Primed RTSP client with SPS (%d B) + PPS (%d B)",
+            len(self._latest_sps), len(self._latest_pps),
+        )
+
     def _broadcast_rtp(self, pkt: bytes, is_video: bool) -> None:
-        """Send one RTP packet to every registered TCP client + UDP client."""
+        """Send one RTP packet to every registered TCP client + UDP client.
+
+        Dead clients (writer closing, broken pipe, etc.) are removed from
+        the active list so we don't keep writing into a closed socket and
+        leaking error log spam every 20ms.
+        """
+        dead: list[_TcpClient] = []
         for c in list(self._active_clients):
             ch = c.video_ch if is_video else c.audio_ch
-            if ch is not None and not c.writer.is_closing():
-                try:
-                    c.writer.write(struct.pack("!BBH", 0x24, ch, len(pkt)) + pkt)
-                except Exception:
-                    pass
+            if ch is None:
+                continue
+            if c.writer.is_closing():
+                dead.append(c)
+                continue
+            try:
+                c.writer.write(struct.pack("!BBH", 0x24, ch, len(pkt)) + pkt)
+            except Exception:
+                dead.append(c)
+
+        for c in dead:
+            with contextlib.suppress(ValueError):
+                self._active_clients.remove(c)
+            with contextlib.suppress(Exception):
+                c.writer.close()
+            _LOGGER.info(
+                "Removed dead RTSP client [%d remain]",
+                len(self._active_clients),
+            )
 
         # UDP fallback — single client (last SETUP wins)
         if self._udp_host:
@@ -409,13 +540,139 @@ class LocalRtspServer:
     # RTP feed loops — run from start() to stop()
     # ------------------------------------------------------------------
 
-    async def _video_feed_loop(self) -> None:
-        """Broadcast H.264 NALs to all registered clients."""
-        ts_increment = 5625  # ~16fps → 90000/16
+    async def _video_rtp_passthrough_loop(self) -> None:
+        """Forward raw video RTP packets with header rewrite.
+
+        Each RTP packet from the device is forwarded immediately with
+        seq/ts/ssrc rewritten and PT forced to 96 (matching SDP).
+        No NAL reassembly or re-fragmentation — the device's own FU-A
+        packing is preserved, eliminating one frame of latency.
+
+        Falls back to the NAL-based loop if no raw RTP packets arrive
+        (standalone/test mode where only nal_queue is fed).
+        """
+        fallback_count = 0
         try:
             while self._running:
                 try:
-                    nal = await asyncio.wait_for(self.nal_queue.get(), timeout=2.0)
+                    rtp = await asyncio.wait_for(
+                        self.rtp_queue.get(), timeout=2.0
+                    )
+                except TimeoutError:
+                    fallback_count += 1
+                    if fallback_count >= 3 and not self.nal_queue.empty():
+                        await self._drain_nal_queue_fallback()
+                    continue
+
+                fallback_count = 0
+                if len(rtp) < 12:
+                    continue
+
+                device_ts = struct.unpack_from("!I", rtp, 4)[0]
+                payload = rtp[12:]
+                if not payload:
+                    continue
+
+                # Cache SPS/PPS from single-NAL packets (not FU-A fragments)
+                nal_type_byte = payload[0] & 0x1F
+                if nal_type_byte == 7 and len(payload) > 1:
+                    self._latest_sps = payload
+                elif nal_type_byte == 8 and len(payload) > 1:
+                    self._latest_pps = payload
+
+                # Translate device timestamp → monotonic output
+                self._translate_video_ts(device_ts)
+
+                # Rewrite RTP header: force PT=96 (matches SDP), keep
+                # marker bit from device, replace seq/ts/ssrc with ours.
+                marker_bit = rtp[1] & 0x80
+                new_header = struct.pack(
+                    "!BBHII",
+                    rtp[0],           # version/padding/extension/CC
+                    marker_bit | 96,  # marker from device + PT=96
+                    self._video_seq,
+                    self._video_ts_out,
+                    self._video_ssrc,
+                )
+                self._video_seq = (self._video_seq + 1) & 0xFFFF
+                self._broadcast_rtp(new_header + payload, is_video=True)
+
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            _LOGGER.debug("Video RTP pass-through loop error", exc_info=True)
+
+    def _translate_video_ts(self, device_ts: int) -> None:
+        """Translate device RTP timestamp to monotonic output timestamp."""
+        if self._last_device_ts is None or self._video_ts_rebase_pending:
+            self._video_ts_offset = (
+                self._video_ts_out + 1 - device_ts
+            ) & 0xFFFFFFFF
+            self._video_ts_rebase_pending = False
+            _LOGGER.debug(
+                "Video timestamp rebased: device=0x%08X seed=0x%08X "
+                "new_out=0x%08X offset=0x%08X",
+                device_ts, self._video_ts_out,
+                (device_ts + self._video_ts_offset) & 0xFFFFFFFF,
+                self._video_ts_offset,
+            )
+        else:
+            forward = (device_ts - self._last_device_ts) & 0xFFFFFFFF
+            if forward > 0x80000000:
+                prev_out = self._video_ts_out
+                self._video_ts_offset = (
+                    self._video_ts_out + 1 - device_ts
+                ) & 0xFFFFFFFF
+                _LOGGER.debug(
+                    "Video timestamp rebased (backward): device=0x%08X "
+                    "prev_out=0x%08X new_out=0x%08X offset=0x%08X",
+                    device_ts, prev_out,
+                    (device_ts + self._video_ts_offset) & 0xFFFFFFFF,
+                    self._video_ts_offset,
+                )
+        self._last_device_ts = device_ts
+        self._video_ts_out = (device_ts + self._video_ts_offset) & 0xFFFFFFFF
+
+    async def _drain_nal_queue_fallback(self) -> None:
+        """Fallback: drain nal_queue using NAL-based packetization."""
+        while not self.nal_queue.empty():
+            try:
+                device_ts, nal = self.nal_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            if nal[:4] == b"\x00\x00\x00\x01":
+                nal_data = nal[4:]
+            elif nal[:3] == b"\x00\x00\x01":
+                nal_data = nal[3:]
+            else:
+                nal_data = nal
+            if not nal_data:
+                continue
+            nal_type = nal_data[0] & 0x1F
+            if nal_type == 7:
+                self._latest_sps = nal_data
+            elif nal_type == 8:
+                self._latest_pps = nal_data
+            self._translate_video_ts(device_ts)
+            self._send_h264(nal_data)
+
+    async def _video_feed_loop(self) -> None:
+        """Broadcast H.264 NALs to all registered clients.
+
+        Uses the device's own RTP timestamp directly — the rtp_receiver
+        extracts it from the RTP header and passes it through the queue.
+        On each new call the device restarts its timestamp from a low
+        value, which would look like a backwards jump to the persistent
+        HA stream worker; we detect that and adjust `_video_ts_offset` so
+        `output_ts = device_ts + offset` stays strictly monotonic and
+        preserves the device's exact inter-frame pacing.
+        """
+        try:
+            while self._running:
+                try:
+                    device_ts, nal = await asyncio.wait_for(
+                        self.nal_queue.get(), timeout=2.0
+                    )
                 except TimeoutError:
                     continue
 
@@ -429,8 +686,58 @@ class LocalRtspServer:
                 if not nal_data:
                     continue
 
+                # Cache SPS/PPS for SDP sprop-parameter-sets.
+                nal_type = nal_data[0] & 0x1F
+                if nal_type == 7:
+                    self._latest_sps = nal_data
+                elif nal_type == 8:
+                    self._latest_pps = nal_data
+
+                # Translate device timestamp → output timestamp.
+                #
+                # Happy path (same call): output_ts = device_ts + offset.
+                # The device's 90 kHz clock increments naturally between
+                # frames so downstream sees the encoder's real pacing.
+                #
+                # Rebase triggers (recompute offset, then next output =
+                # previous _video_ts_out + 1):
+                #   1. First frame ever on this server instance.
+                #   2. reset() set `_video_ts_rebase_pending` because a
+                #      new call is starting — `_video_ts_out` has been
+                #      seeded from the audio clock for A/V alignment.
+                #   3. device_ts jumped backwards (device clock reset
+                #      mid-stream without our reset() being called).
+                if (
+                    self._last_device_ts is None
+                    or self._video_ts_rebase_pending
+                ):
+                    self._video_ts_offset = (
+                        self._video_ts_out + 1 - device_ts
+                    ) & 0xFFFFFFFF
+                    self._video_ts_rebase_pending = False
+                    _LOGGER.debug(
+                        "Video timestamp rebased (bootstrap): "
+                        "device_ts=0x%08X out=0x%08X offset=0x%08X",
+                        device_ts, self._video_ts_out + 1,
+                        self._video_ts_offset,
+                    )
+                else:
+                    forward = (device_ts - self._last_device_ts) & 0xFFFFFFFF
+                    if forward > 0x80000000:
+                        self._video_ts_offset = (
+                            self._video_ts_out + 1 - device_ts
+                        ) & 0xFFFFFFFF
+                        _LOGGER.debug(
+                            "Video timestamp rebased (backward jump): "
+                            "device_ts=0x%08X out=0x%08X offset=0x%08X",
+                            device_ts, self._video_ts_out + 1,
+                            self._video_ts_offset,
+                        )
+
+                self._last_device_ts = device_ts
+                self._video_ts_out = (device_ts + self._video_ts_offset) & 0xFFFFFFFF
+
                 self._send_h264(nal_data)
-                self._video_ts = (self._video_ts + ts_increment) & 0xFFFFFFFF
 
         except asyncio.CancelledError:
             pass
@@ -441,7 +748,7 @@ class LocalRtspServer:
         """Packetize one H.264 NAL unit and broadcast to all clients."""
         if len(nal_data) <= _MAX_RTP_PAYLOAD:
             pkt = _build_rtp(
-                pt=96, seq=self._video_seq, ts=self._video_ts,
+                pt=96, seq=self._video_seq, ts=self._video_ts_out,
                 ssrc=self._video_ssrc, payload=nal_data, marker=True,
             )
             self._video_seq = (self._video_seq + 1) & 0xFFFF
@@ -465,7 +772,7 @@ class LocalRtspServer:
                 fragment = struct.pack("BB", fu_indicator, fu_header) + chunk
 
                 pkt = _build_rtp(
-                    pt=96, seq=self._video_seq, ts=self._video_ts,
+                    pt=96, seq=self._video_seq, ts=self._video_ts_out,
                     ssrc=self._video_ssrc, payload=fragment, marker=last,
                 )
                 self._video_seq = (self._video_seq + 1) & 0xFFFF

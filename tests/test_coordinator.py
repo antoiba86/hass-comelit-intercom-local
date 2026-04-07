@@ -8,7 +8,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from custom_components.comelit_intercom_local.coordinator import ComelitLocalCoordinator
-from custom_components.comelit_intercom_local.const import PREWARM_DELAY_SECONDS
 
 
 # ---------------------------------------------------------------------------
@@ -29,7 +28,10 @@ def _make_coordinator() -> ComelitLocalCoordinator:
     coordinator._config = MagicMock()
     coordinator._video_session = None
     coordinator._video_stopped_by_user = False
-    coordinator._prewarm_task = None
+    coordinator._video_start_lock = asyncio.Lock()
+    coordinator._video_ready_event = asyncio.Event()
+    coordinator._rtsp_server = None
+    coordinator._rtsp_url = None
     coordinator._push_callbacks = {}
     coordinator.logger = MagicMock()
     return coordinator
@@ -70,79 +72,11 @@ class TestRequestVideoStop:
 
 
 # ---------------------------------------------------------------------------
-# _cancel_prewarm
-# ---------------------------------------------------------------------------
-
-
-class TestCancelPrewarm:
-    def test_cancel_prewarm_noop_when_no_task(self):
-        coord = _make_coordinator()
-        coord._cancel_prewarm()  # should not raise
-        assert coord._prewarm_task is None
-
-    @pytest.mark.asyncio
-    async def test_cancel_prewarm_cancels_running_task(self):
-        coord = _make_coordinator()
-        cancelled = asyncio.Event()
-
-        async def long_task():
-            try:
-                await asyncio.sleep(100)
-            except asyncio.CancelledError:
-                cancelled.set()
-                raise
-
-        coord._prewarm_task = asyncio.create_task(long_task())
-        await asyncio.sleep(0)
-
-        coord._cancel_prewarm()
-
-        assert coord._prewarm_task is None
-        # Give the task a chance to handle CancelledError
-        await asyncio.sleep(0.05)
-        assert cancelled.is_set()
-
-    @pytest.mark.asyncio
-    async def test_cancel_prewarm_ignores_done_task(self):
-        coord = _make_coordinator()
-
-        async def done_task():
-            return
-
-        task = asyncio.create_task(done_task())
-        await task  # let it finish
-        coord._prewarm_task = task
-        coord._cancel_prewarm()  # should not raise
-
-
-# ---------------------------------------------------------------------------
 # async_stop_video
 # ---------------------------------------------------------------------------
 
 
 class TestAsyncStopVideo:
-    @pytest.mark.asyncio
-    async def test_stop_video_cancels_prewarm(self):
-        """async_stop_video must cancel the prewarm task."""
-        coord = _make_coordinator()
-        cancelled = asyncio.Event()
-
-        async def long_task():
-            try:
-                await asyncio.sleep(100)
-            except asyncio.CancelledError:
-                cancelled.set()
-                raise
-
-        coord._prewarm_task = asyncio.create_task(long_task())
-        await asyncio.sleep(0)
-
-        await coord.async_stop_video()
-
-        await asyncio.sleep(0.05)
-        assert cancelled.is_set()
-        assert coord._prewarm_task is None
-
     @pytest.mark.asyncio
     async def test_stop_video_stops_session(self):
         coord = _make_coordinator()
@@ -155,32 +89,36 @@ class TestAsyncStopVideo:
         mock_session.stop.assert_awaited_once()
         assert coord._video_session is None
 
+    @pytest.mark.asyncio
+    async def test_stop_video_clears_ready_event(self):
+        """async_stop_video clears the _video_ready_event so stream_source re-waits."""
+        coord = _make_coordinator()
+        coord._video_ready_event.set()
+        mock_session = MagicMock()
+        mock_session.stop = AsyncMock()
+        coord._video_session = mock_session
+
+        await coord.async_stop_video()
+
+        assert not coord._video_ready_event.is_set()
+
+    @pytest.mark.asyncio
+    async def test_stop_video_noop_when_no_session(self):
+        """async_stop_video is safe to call when there is no active session."""
+        coord = _make_coordinator()
+        coord._video_session = None
+        await coord.async_stop_video()  # must not raise
+
 
 # ---------------------------------------------------------------------------
-# async_start_video — prewarm scheduling
+# async_start_video
 # ---------------------------------------------------------------------------
 
 
 class TestAsyncStartVideo:
     @pytest.mark.asyncio
-    async def test_start_video_schedules_prewarm_when_no_timeout(self):
-        """auto_timeout=False should schedule a prewarm task."""
-        coord = _make_coordinator()
-        mock_session = MagicMock()
-        mock_session.start = AsyncMock()
-
-        with patch(
-            "custom_components.comelit_intercom_local.coordinator.VideoCallSession",
-            return_value=mock_session,
-        ):
-            await coord.async_start_video(auto_timeout=False)
-
-        assert coord._prewarm_task is not None
-        coord._cancel_prewarm()
-
-    @pytest.mark.asyncio
-    async def test_start_video_does_not_schedule_prewarm_when_auto_timeout(self):
-        """auto_timeout=True (button-triggered) should NOT schedule a prewarm."""
+    async def test_start_video_sets_session(self):
+        """async_start_video stores the new session in _video_session."""
         coord = _make_coordinator()
         mock_session = MagicMock()
         mock_session.start = AsyncMock()
@@ -191,102 +129,63 @@ class TestAsyncStartVideo:
         ):
             await coord.async_start_video(auto_timeout=True)
 
-        assert coord._prewarm_task is None
+        assert coord._video_session is mock_session
 
-
-# ---------------------------------------------------------------------------
-# _prewarm_loop
-# ---------------------------------------------------------------------------
-
-
-class TestPrewarmLoop:
     @pytest.mark.asyncio
-    async def test_prewarm_loop_exits_when_cancelled_during_sleep(self):
-        """If CancelledError arrives during the initial sleep, loop exits cleanly."""
+    async def test_start_video_fires_ready_event(self):
+        """async_start_video sets _video_ready_event after session starts."""
         coord = _make_coordinator()
+        mock_session = MagicMock()
+        mock_session.start = AsyncMock()
 
-        task = asyncio.create_task(coord._prewarm_loop())
-        await asyncio.sleep(0)  # let loop start and reach asyncio.sleep(PREWARM_DELAY)
-        task.cancel()
-        await asyncio.sleep(0)
+        with patch(
+            "custom_components.comelit_intercom_local.coordinator.VideoCallSession",
+            return_value=mock_session,
+        ):
+            await coord.async_start_video(auto_timeout=True)
 
-        # Task should finish without error
-        assert task.done()
+        assert coord._video_ready_event.is_set()
 
     @pytest.mark.asyncio
-    async def test_prewarm_loop_aborts_when_stopped_by_user(self):
-        """If video was stopped by user before sleep ends, loop exits without starting."""
+    async def test_start_video_drops_concurrent_call(self):
+        """A second async_start_video while one is in progress is dropped, not queued."""
+        coord = _make_coordinator()
+        started = asyncio.Event()
+        unblock = asyncio.Event()
+
+        async def slow_start():
+            started.set()
+            await unblock.wait()
+
+        mock_session = MagicMock()
+        mock_session.start = AsyncMock(side_effect=slow_start)
+
+        with patch(
+            "custom_components.comelit_intercom_local.coordinator.VideoCallSession",
+            return_value=mock_session,
+        ):
+            task1 = asyncio.create_task(coord.async_start_video())
+            await started.wait()  # first call is inside the lock
+
+            # Second call should be rejected immediately (lock is held)
+            with pytest.raises(RuntimeError, match="already in progress"):
+                await coord.async_start_video()
+
+            unblock.set()
+            await task1
+
+    @pytest.mark.asyncio
+    async def test_start_video_resets_stopped_flag(self):
+        """async_start_video clears _video_stopped_by_user before starting."""
         coord = _make_coordinator()
         coord._video_stopped_by_user = True
+        mock_session = MagicMock()
+        mock_session.start = AsyncMock()
 
-        with patch("asyncio.sleep", new_callable=AsyncMock):
-            await coord._prewarm_loop()
+        with patch(
+            "custom_components.comelit_intercom_local.coordinator.VideoCallSession",
+            return_value=mock_session,
+        ):
+            await coord.async_start_video()
 
-        # No new session should have been created (config not needed)
-        assert coord._video_session is None
-
-    @pytest.mark.asyncio
-    async def test_prewarm_loop_swaps_session_on_success(self):
-        """A successful pre-warm atomically replaces the old session."""
-        coord = _make_coordinator()
-
-        old_session = MagicMock()
-        old_session.stop = AsyncMock()
-        coord._video_session = old_session
-
-        new_session = MagicMock()
-        new_receiver = MagicMock()
-        new_receiver.get_jpeg_frame = AsyncMock(return_value=b"\xff\xd8\xff\xd9")
-        new_session.start = AsyncMock()
-        new_session.rtp_receiver = new_receiver
-
-        with patch("asyncio.sleep", new_callable=AsyncMock):
-            with patch(
-                "custom_components.comelit_intercom_local.coordinator.VideoCallSession",
-                return_value=new_session,
-            ):
-                # Run one iteration (without the recursive self._prewarm_task assignment)
-                with patch.object(coord, "_prewarm_loop", wraps=coord._prewarm_loop) as mock_loop:
-                    # Prevent infinite recursion: cancel the recursive task immediately
-                    original_create_task = asyncio.get_running_loop().create_task
-                    created_tasks = []
-
-                    def patched_create_task(coro, **kwargs):
-                        t = original_create_task(coro, **kwargs)
-                        created_tasks.append(t)
-                        t.cancel()  # Cancel the recursive prewarm immediately
-                        return t
-
-                    with patch.object(
-                        asyncio.get_running_loop(), "create_task", side_effect=patched_create_task
-                    ):
-                        await coord._prewarm_loop()
-
-        # New session should be the active one
-        assert coord._video_session is new_session
-
-    @pytest.mark.asyncio
-    async def test_prewarm_loop_discards_new_session_if_user_stopped(self):
-        """If user stopped video during prewarm establishment, new session is discarded."""
-        coord = _make_coordinator()
-        coord._video_session = None
-
-        new_session = MagicMock()
-        new_session.start = AsyncMock()
-        new_session.stop = AsyncMock()
-        new_session.rtp_receiver = None
-
-        async def set_stopped_during_start():
-            coord._video_stopped_by_user = True
-
-        new_session.start = AsyncMock(side_effect=set_stopped_during_start)
-
-        with patch("asyncio.sleep", new_callable=AsyncMock):
-            with patch(
-                "custom_components.comelit_intercom_local.coordinator.VideoCallSession",
-                return_value=new_session,
-            ):
-                await coord._prewarm_loop()
-
-        # Session should NOT have been swapped in
-        assert coord._video_session is None
+        assert coord._video_stopped_by_user is False

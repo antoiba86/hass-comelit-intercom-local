@@ -3,10 +3,10 @@
   "name": "Comelit Intercom Local",
   "codeowners": ["@antoiba86"],
   "config_flow": true,
-  "dependencies": ["stream"],
+  "dependencies": ["http", "lovelace", "stream"],
   "documentation": "https://github.com/antoiba86/hass-comelit-intercom-local",
   "issue_tracker": "https://github.com/antoiba86/hass-comelit-intercom-local/issues",
   "iot_class": "local_push",
   "requirements": ["aiohttp>=3.9", "av>=12.0.0"],
-  "version": "0.1.2"
+  "version": "0.1.3"
 }

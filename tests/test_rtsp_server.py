@@ -210,28 +210,34 @@ class TestReset:
         server.reset()
         assert server.audio_queue.empty()
 
-    def test_reset_without_renewal_clears_counters(self):
+    def test_reset_never_clears_rtp_counters(self):
+        """reset() never resets RTP seq/ts — the persistent HA stream worker
+        stays connected across calls and backwards jumps cause discontinuity errors."""
         server = LocalRtspServer()
         server._video_seq = 100
         server._audio_seq = 50
-        server._video_ts = 90000
         server._audio_ts = 8000
         server.reset(renewal=False)
-        assert server._video_seq == 0
-        assert server._audio_seq == 0
-        assert server._video_ts == 0
-        assert server._audio_ts == 0
+        assert server._video_seq == 100
+        assert server._audio_seq == 50
+        assert server._audio_ts == 8000
 
-    def test_reset_with_renewal_preserves_counters(self):
+    def test_reset_sets_rebase_pending(self):
+        """reset() sets _video_ts_rebase_pending so the feed loop rebases on next NAL."""
+        server = LocalRtspServer()
+        server._video_ts_rebase_pending = False
+        server.reset()
+        assert server._video_ts_rebase_pending is True
+
+    def test_reset_with_renewal_also_preserves_counters(self):
+        """renewal=True is kept for API compatibility but no longer changes behaviour."""
         server = LocalRtspServer()
         server._video_seq = 200
         server._audio_seq = 100
-        server._video_ts = 180000
         server._audio_ts = 16000
         server.reset(renewal=True)
         assert server._video_seq == 200
         assert server._audio_seq == 100
-        assert server._video_ts == 180000
         assert server._audio_ts == 16000
 
     def test_reset_preserves_active_clients(self):
@@ -290,6 +296,39 @@ class TestLifecycle:
         await server.start()
         try:
             assert server._rtsp_port > 0
+        finally:
+            await server.stop()
+
+    @pytest.mark.asyncio
+    async def test_udp_sockets_are_created(self):
+        """UDP sockets are created during start()."""
+        server = LocalRtspServer(bind_host="127.0.0.1")
+        await server.start()
+        try:
+            assert server._video_sock is not None
+            assert server._audio_sock is not None
+        finally:
+            await server.stop()
+
+    @pytest.mark.asyncio
+    async def test_udp_sockets_bind_to_wildcard(self):
+        """UDP sockets bind to 0.0.0.0 to receive RTP from the device on any interface."""
+        server = LocalRtspServer(bind_host="127.0.0.1")
+        await server.start()
+        try:
+            assert server._video_sock.getsockname()[0] == "0.0.0.0"
+            assert server._audio_sock.getsockname()[0] == "0.0.0.0"
+        finally:
+            await server.stop()
+
+    @pytest.mark.asyncio
+    async def test_udp_sockets_get_ephemeral_port(self):
+        """UDP sockets receive an OS-assigned ephemeral port (> 0)."""
+        server = LocalRtspServer()
+        await server.start()
+        try:
+            assert server._video_sock.getsockname()[1] > 0
+            assert server._audio_sock.getsockname()[1] > 0
         finally:
             await server.stop()
 

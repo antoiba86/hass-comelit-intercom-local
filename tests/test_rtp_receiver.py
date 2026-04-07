@@ -117,7 +117,7 @@ class TestDecodeLoopRobustness:
 
         with patch.dict(sys.modules, {"av": fake_av, "av.error": fake_av.error}):
             for _ in range(10):
-                await receiver._nal_queue.put(b"\x00\x00\x00\x01\x65" + b"\x00" * 20)
+                await receiver._nal_queue.put((0, b"\x00\x00\x00\x01\x65" + b"\x00" * 20))
 
             await receiver._decode_loop()
 
@@ -148,7 +148,7 @@ class TestDecodeLoopRobustness:
 
         with patch.dict(sys.modules, {"av": fake_av, "av.error": fake_av.error}):
             for _ in range(10):
-                await receiver._nal_queue.put(b"\x00\x00\x00\x01\x65" + b"\x00" * 20)
+                await receiver._nal_queue.put((0, b"\x00\x00\x00\x01\x65" + b"\x00" * 20))
             await receiver._decode_loop()
 
         assert parse_call_count >= 3
@@ -258,8 +258,8 @@ class TestProcessRtp:
         rtp = _make_rtp_packet(nal_payload)
         receiver._process_rtp(rtp)
         assert not receiver._nal_queue.empty()
-        queued = receiver._nal_queue.get_nowait()
-        assert queued.startswith(b"\x00\x00\x00\x01")
+        _rtp_ts, nal = receiver._nal_queue.get_nowait()
+        assert nal.startswith(b"\x00\x00\x00\x01")
 
     def test_pps_nal_queued(self):
         """PPS NAL (type 8) is queued with start code prefix."""
@@ -308,8 +308,8 @@ class TestProcessRtp:
 
         # Now the queue should have the complete NAL
         assert not receiver._nal_queue.empty()
-        queued = receiver._nal_queue.get_nowait()
-        assert queued.startswith(b"\x00\x00\x00\x01")
+        _rtp_ts, nal = receiver._nal_queue.get_nowait()
+        assert nal.startswith(b"\x00\x00\x00\x01")
 
     def test_fua_continuation_without_start_ignored(self):
         """FU-A continuation fragment without a prior start is discarded."""
@@ -350,39 +350,39 @@ class TestQueueNal:
         receiver = RtpReceiver("127.0.0.1")
         # Fill the queue to capacity
         for _ in range(500):
-            receiver._nal_queue.put_nowait(b"\x00" * 4)
+            receiver._nal_queue.put_nowait((0, b"\x00" * 4))
         # This should not raise
-        receiver._queue_nal(b"\x00\x00\x00\x01\x67")
+        receiver._queue_nal(0, b"\x00\x00\x00\x01\x67")
         assert receiver._nal_queue.full()
 
     def test_nal_also_pushed_to_rtsp_queue(self):
-        """_queue_nal pushes NAL to RTSP fanout queue when attached."""
+        """_queue_nal pushes (rtp_ts, nal) tuple to RTSP fanout queue when attached."""
         receiver = RtpReceiver("127.0.0.1")
         rtsp_nal_q = asyncio.Queue()
         receiver.attach_rtsp_queues(rtsp_nal_q, asyncio.Queue())
 
         nal = b"\x00\x00\x00\x01\x67" + b"\x00" * 10
-        receiver._queue_nal(nal)
+        receiver._queue_nal(0xDEAD, nal)
 
         assert not receiver._nal_queue.empty()
         assert not rtsp_nal_q.empty()
-        assert rtsp_nal_q.get_nowait() == nal
+        assert rtsp_nal_q.get_nowait() == (0xDEAD, nal)
 
     def test_rtsp_nal_queue_full_drops_silently(self):
         """_queue_nal drops silently when RTSP fanout queue is full."""
         receiver = RtpReceiver("127.0.0.1")
         rtsp_nal_q = asyncio.Queue(maxsize=1)
-        rtsp_nal_q.put_nowait(b"already_full")
+        rtsp_nal_q.put_nowait((0, b"already_full"))
         receiver.attach_rtsp_queues(rtsp_nal_q, asyncio.Queue())
 
         nal = b"\x00\x00\x00\x01\x67" + b"\x00" * 10
-        receiver._queue_nal(nal)  # Must not raise
+        receiver._queue_nal(0, nal)  # Must not raise
 
     def test_nal_queue_still_receives_when_no_rtsp(self):
         """_queue_nal works normally when no RTSP queues are attached."""
         receiver = RtpReceiver("127.0.0.1")
         nal = b"\x00\x00\x00\x01\x65" + b"\x00" * 10
-        receiver._queue_nal(nal)
+        receiver._queue_nal(0, nal)
         assert not receiver._nal_queue.empty()
 
 

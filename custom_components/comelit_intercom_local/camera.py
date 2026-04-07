@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Callable
 
@@ -85,10 +86,18 @@ class ComelitIntercomCamera(Camera):
     Serves a persistent local RTSP stream (started at integration load) so
     go2rtc can connect immediately. When a video call session is active,
     H.264 video and G.711 audio flow through to the browser via WebRTC.
+
+    `CameraEntityFeature.STREAM` is required for go2rtc's WebRTC path to
+    work — without it, HA falls back to MJPEG polling via
+    `async_camera_image()` at ~2 fps, wasting the 25 fps we get from the
+    device.  The 24 s first-call HLS warmup that the stream worker would
+    otherwise cause is avoided by gating `stream_source()` — it returns
+    None until a video session is active, so the stream worker cannot
+    connect at HA boot and freeze its codec context with pix_fmt=-1.
     """
 
     _attr_has_entity_name = True
-    _attr_name = "Intercom Video"
+    _attr_name = "Live Feed"
     _attr_icon = "mdi:doorbell-video"
     _attr_supported_features = CameraEntityFeature.STREAM
 
@@ -115,12 +124,24 @@ class ComelitIntercomCamera(Camera):
         )
 
     async def stream_source(self) -> str | None:
-        """Return the persistent RTSP URL so go2rtc can connect at startup.
+        """Return the RTSP URL, waiting briefly if a session is starting.
 
-        Always returns the coordinator's RTSP URL (non-None after setup).
-        go2rtc connects once and receives frames when a call is active.
+        If the user presses Start Video and opens the camera card
+        immediately, the CTPP handshake may still be in flight.
+        Rather than returning None (which makes HA fall back to JPEG
+        and never retry), wait up to 5s for the session to become
+        ready.  Returns None only if no session starts in time.
         """
-        return self._coordinator.rtsp_url
+        if self._coordinator.video_session is not None:
+            return self._coordinator.rtsp_url
+        # Wait for an in-flight session to become ready
+        try:
+            await asyncio.wait_for(
+                self._coordinator._video_ready_event.wait(), timeout=5.0
+            )
+            return self._coordinator.rtsp_url
+        except TimeoutError:
+            return None
 
     async def async_camera_image(
         self, width: int | None = None, height: int | None = None

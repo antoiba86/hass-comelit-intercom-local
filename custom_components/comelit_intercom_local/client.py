@@ -403,6 +403,14 @@ class IconaBridgeClient:
         self._channels[name] = channel
         return channel
 
+    def release_placeholder_channel(self, name: str) -> None:
+        """Remove an unassigned placeholder without sending a close packet.
+
+        Call this when a placeholder times out so it doesn't steal future
+        device-initiated channel opens (e.g. re-establishment RTPC channels).
+        """
+        self._channels.pop(name, None)
+
     def set_push_callback(self, callback: Callable[[dict], None] | None) -> None:
         """Set a callback for push notifications (unsolicited JSON messages)."""
         self._push_callback = callback

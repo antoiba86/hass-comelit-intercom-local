@@ -58,18 +58,16 @@ class ComelitDoorButton(CoordinatorEntity[ComelitLocalCoordinator], ButtonEntity
         self._door = door
         self._entry_id = entry_id
         self._attr_unique_id = f"{entry_id}_door_{door.index}"
-        # Door names are device-provided strings, not static labels.
         self._attr_name = door.name
 
     @property
     def device_info(self) -> DeviceInfo:
-        """Return device info linking this button to its door device."""
+        """Return device info linking this button to the main intercom device."""
         return DeviceInfo(
-            identifiers={(DOMAIN, f"{self._entry_id}_door_{self._door.index}")},
+            identifiers={(DOMAIN, self._entry_id)},
             manufacturer=MANUFACTURER,
             model=MODEL,
-            name=self._door.name,
-            via_device=(DOMAIN, self._entry_id),
+            name="Comelit Intercom",
         )
 
     async def async_press(self) -> None:

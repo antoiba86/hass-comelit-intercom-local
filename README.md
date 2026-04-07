@@ -5,8 +5,9 @@ Home Assistant custom component for the **Comelit 6701W** WiFi video intercom. C
 ## Features
 
 - **Remote door opening** — open doors/gates from Home Assistant
-- **Live intercom video** — view the door camera stream directly in HA dashboards
+- **Live intercom video** — view the door camera stream directly in HA dashboards via go2rtc/WebRTC
 - **Doorbell events** — automations trigger on ring or missed call
+- **Custom Lovelace card** — play-button UI auto-registered on startup; starts video on click, stops on navigation away
 - **100% local** — all communication stays on your LAN, no cloud required
 
 ## Requirements
@@ -38,12 +39,27 @@ Home Assistant custom component for the **Comelit 6701W** WiFi video intercom. C
 
 ## Entities
 
-| Entity Type | Description |
-|-------------|-------------|
-| **Button** | One per door — press to open |
-| **Camera (Intercom Video)** | Live video stream from the door panel. Auto-starts when you open the camera in the dashboard; stops when you close it. Also auto-starts on doorbell ring and stops automatically after 120 seconds. |
-| **Camera (RTSP)** | RTSP stream from each additional configured camera |
-| **Event** | Fires `doorbell_ring` and `missed_call` events for automations |
+| Entity | Description |
+|--------|-------------|
+| `button.comelit_intercom_<door_name>` | Press to open a door or gate (e.g., `button.comelit_intercom_actuator`) |
+| `button.comelit_intercom_start_video_feed` | Manually start the intercom video call |
+| `button.comelit_intercom_stop_video_feed` | Stop the active video call |
+| `camera.comelit_intercom_live_feed` | Live video stream from the door panel (WebRTC via go2rtc). Auto-starts on doorbell ring. |
+| `camera.comelit_intercom_<name>` | RTSP stream from each additional configured camera |
+| `event.comelit_intercom_doorbell` | Fires `doorbell_ring` and `missed_call` events for automations |
+
+### Lovelace Card
+
+A custom card is automatically registered on startup. Add it to your dashboard:
+
+```yaml
+type: custom:comelit-intercom-card
+camera_entity: camera.comelit_intercom_live_feed
+start_entity: button.comelit_intercom_start_video_feed  # optional
+stop_entity: button.comelit_intercom_stop_video_feed
+```
+
+The card shows a camera snapshot with a play button overlay. Click play to start the video feed. Video stops automatically when you navigate away.
 
 ### Automation Example
 
@@ -52,7 +68,7 @@ automation:
   - alias: "Notify on doorbell ring"
     trigger:
       - platform: state
-        entity_id: event.comelit_intercom_local_doorbell
+        entity_id: event.comelit_intercom_doorbell
         attribute: event_type
         to: "doorbell_ring"
     action:
@@ -75,9 +91,14 @@ Key operations:
 - **Door open**: Open CTPP channel → 6-step binary sequence (init → open+confirm → door init → open+confirm)
 - **Push notifications**: Open PUSH channel → receive unsolicited JSON on doorbell ring
 
-## Future developments
+## Changelog
 
-- **Audio** — receive sound from the door panel during a video call
+### 0.1.3
+- **Video renewal** — inline re-establishment on CALL_END (~30s) without TCP reconnect; video is uninterrupted
+- **Custom Lovelace card** — play-button UI auto-registered on HA startup; no manual resource configuration needed
+- **Concurrent session protection** — a second video start while one is in progress is immediately rejected, preventing CTPP negotiation conflicts
+- **TCP video fallback** — video works via TCP (RTPC2) when UDP is blocked by NAT/firewall
+- **Consistent entity naming** — all entities use the `comelit_intercom_` prefix (e.g., `button.comelit_intercom_actuator`, `camera.comelit_intercom_live_feed`)
 
 ## Acknowledgments
 
