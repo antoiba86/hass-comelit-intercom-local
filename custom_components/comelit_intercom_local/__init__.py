@@ -24,6 +24,9 @@ PLATFORMS = [Platform.BUTTON, Platform.CAMERA, Platform.EVENT]
 _CARD_URL = "/comelit_intercom_local/comelit-intercom-card.js"
 _CARD_PATH = str(Path(__file__).parent / "www" / "comelit-intercom-card.js")
 
+_DOORBELL_CARD_URL = "/comelit_intercom_local/comelit-doorbell-card.js"
+_DOORBELL_CARD_PATH = str(Path(__file__).parent / "www" / "comelit-doorbell-card.js")
+
 
 async def _register_static_path(hass: HomeAssistant, url: str, path: str) -> None:
     """Register a static file path, compatible with all HA versions."""
@@ -72,11 +75,15 @@ async def _init_resource(hass: HomeAssistant, url: str, version: str) -> None:
 
 
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:
-    """Register the Lovelace card static file and add it to resources."""
-    await _register_static_path(hass, _CARD_URL, _CARD_PATH)
+    """Register the Lovelace card static files and add them to resources."""
     version = getattr(hass.data.get("integrations", {}).get(DOMAIN), "version", "0")
-    await _init_resource(hass, _CARD_URL, str(version))
-    _LOGGER.info("Comelit Intercom card registered at %s", _CARD_URL)
+    for url, path in (
+        (_CARD_URL, _CARD_PATH),
+        (_DOORBELL_CARD_URL, _DOORBELL_CARD_PATH),
+    ):
+        await _register_static_path(hass, url, path)
+        await _init_resource(hass, url, str(version))
+        _LOGGER.info("Comelit card registered at %s", url)
     return True
 
 

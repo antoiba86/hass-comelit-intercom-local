@@ -44,13 +44,15 @@ Home Assistant custom component for the **Comelit 6701W** WiFi video intercom. C
 | `button.comelit_intercom_<door_name>` | Press to open a door or gate (e.g., `button.comelit_intercom_actuator`) |
 | `button.comelit_intercom_start_video_feed` | Manually start the intercom video call |
 | `button.comelit_intercom_stop_video_feed` | Stop the active video call |
-| `camera.comelit_intercom_live_feed` | Live video stream from the door panel via local RTSP. Auto-starts on doorbell ring. |
+| `camera.comelit_intercom_live_feed` | Live video stream from the door panel via local RTSP |
 | `camera.comelit_intercom_<name>` | RTSP stream from each additional configured camera |
 | `event.comelit_intercom_doorbell` | Fires `doorbell_ring` and `missed_call` events for automations |
 
-### Lovelace Card
+### Lovelace Cards
 
-A custom card is automatically registered on startup. Add it to your dashboard:
+Two custom cards are automatically registered on startup — both are optional.
+
+**Intercom camera card** — snapshot with play button overlay; click to start video, stops on navigation away:
 
 ```yaml
 type: custom:comelit-intercom-card
@@ -59,22 +61,82 @@ start_entity: button.comelit_intercom_start_video_feed  # optional
 stop_entity: button.comelit_intercom_stop_video_feed
 ```
 
-The card shows a camera snapshot with a play button overlay. Click play to start the video feed. Video stops automatically when you navigate away.
-
-### Automation Example
+**Doorbell notification card** — shows a pulsing alert with Answer/Dismiss buttons when someone rings; auto-dismisses after `dismiss_after` seconds:
 
 ```yaml
-automation:
-  - alias: "Notify on doorbell ring"
-    trigger:
-      - platform: state
-        entity_id: event.comelit_intercom_doorbell
-        attribute: event_type
-        to: "doorbell_ring"
-    action:
-      - service: notify.mobile_app
-        data:
-          message: "Someone is at the door!"
+type: custom:comelit-doorbell-card
+doorbell_entity: event.comelit_intercom_doorbell
+camera_entity: camera.comelit_intercom_live_feed
+start_entity: button.comelit_intercom_start_video_feed
+stop_entity: button.comelit_intercom_stop_video_feed
+dismiss_after: 30  # optional, default 30s
+```
+
+States: **Idle** (thumbnail + doorbell badge) → **Ringing** (pulsing icon + Answer/Dismiss) → **Answered** (live stream + stop button).
+
+### Doorbell Notifications
+
+When someone rings the doorbell, `event.comelit_intercom_doorbell` fires a `doorbell_ring` event. Video does **not** start automatically — you decide what happens via automations.
+
+**Basic notification:**
+
+```yaml
+alias: "Notify on doorbell ring"
+mode: single
+triggers:
+  - platform: state
+    entity_id: event.comelit_intercom_doorbell
+    to: "doorbell_ring"
+conditions: []
+actions:
+  - action: notify.mobile_app_your_phone
+    data:
+      title: "Doorbell"
+      message: "Someone is at the door!"
+```
+
+**Notification with action button to open the camera view:**
+
+```yaml
+alias: "Doorbell ring with camera shortcut"
+mode: single
+triggers:
+  - platform: state
+    entity_id: event.comelit_intercom_doorbell
+    to: "doorbell_ring"
+conditions: []
+actions:
+  - action: notify.mobile_app_your_phone
+    data:
+      title: "Doorbell"
+      message: "Someone is at the door!"
+      data:
+        actions:
+          - action: URI
+            title: "Open Camera"
+            uri: /lovelace/intercom
+```
+
+**Auto-start video on ring (opt-in):**
+
+If you want the video to start automatically when the doorbell rings:
+
+```yaml
+alias: "Doorbell ring — notify and start video"
+mode: single
+triggers:
+  - platform: state
+    entity_id: event.comelit_intercom_doorbell
+    to: "doorbell_ring"
+conditions: []
+actions:
+  - action: notify.mobile_app_your_phone
+    data:
+      title: "Doorbell"
+      message: "Someone is at the door!"
+  - action: button.press
+    target:
+      entity_id: button.comelit_intercom_start_video_feed
 ```
 
 ## Protocol

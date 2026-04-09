@@ -23,6 +23,7 @@ from .models import DeviceConfig, Door, PushEvent
 from .push import register_push
 from .rtsp_server import LocalRtspServer
 from .video_call import VideoCallSession
+from .vip_listener import VipEventListener
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -64,6 +65,7 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
         self._video_ready_event: asyncio.Event = asyncio.Event()
         self._rtsp_server: LocalRtspServer | None = None
         self._rtsp_url: str | None = None
+        self._vip_listener: VipEventListener | None = None
         # Use an insertion-ordered dict to track callbacks (value is always None).
         # This avoids ValueError on removal and preserves iteration order.
         self._push_callbacks: dict[Callable[[PushEvent], None], None] = {}
@@ -97,6 +99,16 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
 
         self._client = client
 
+        # Start VIP event listener for doorbell ring detection.
+        # The PUSH channel is one-shot FCM registration; actual call events
+        # arrive as binary VIP messages on the CTPP channel.
+        try:
+            vip = VipEventListener(client, self._config, self._on_push_event)
+            await vip.start()
+            self._vip_listener = vip
+        except Exception:
+            _LOGGER.warning("Failed to start VIP event listener", exc_info=True)
+
         # Start persistent RTSP server so go2rtc can connect immediately
         if not self._rtsp_server:
             rtsp = LocalRtspServer()
@@ -113,6 +125,11 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
 
     async def _reconnect(self) -> None:
         """Tear down old connection and re-establish everything."""
+        if self._vip_listener:
+            with contextlib.suppress(Exception):
+                await self._vip_listener.stop()
+            self._vip_listener = None
+
         old_client = self._client
         self._client = None
         if old_client:
@@ -134,11 +151,23 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
             raise
 
         self._client = client
+
+        try:
+            vip = VipEventListener(client, self._config, self._on_push_event)
+            await vip.start()
+            self._vip_listener = vip
+        except Exception:
+            _LOGGER.warning("Failed to start VIP listener on reconnect", exc_info=True)
+
         _LOGGER.info("Comelit reconnected successfully")
 
     async def async_shutdown(self) -> None:
         """Disconnect from the device."""
         await self.async_stop_video()
+        if self._vip_listener:
+            with contextlib.suppress(Exception):
+                await self._vip_listener.stop()
+            self._vip_listener = None
         if self._rtsp_server:
             with contextlib.suppress(Exception):
                 await self._rtsp_server.stop()
