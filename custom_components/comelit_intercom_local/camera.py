@@ -14,7 +14,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from .camera_utils import get_rtsp_url
 from .const import DOMAIN, MANUFACTURER, MODEL
 from .coordinator import ComelitLocalConfigEntry, ComelitLocalCoordinator
-from .models import Camera as CameraModel, PushEvent
+from .models import Camera as CameraModel
 from .placeholder import PLACEHOLDER_JPEG
 
 _LOGGER = logging.getLogger(__name__)
@@ -164,21 +164,4 @@ class ComelitIntercomCamera(Camera):
         await self._coordinator.async_stop_video()
 
     def _on_push(self, event: PushEvent) -> None:
-        """Auto-start video on doorbell ring event."""
-        if event.event_type == "doorbell_ring":
-            session = self._coordinator.video_session
-            if session and session.active:
-                _LOGGER.debug("Video already active, skipping doorbell auto-start")
-                return
-            _LOGGER.info("Doorbell ring detected — starting intercom video")
-            self.hass.async_create_task(self._start_video())
-
-    async def _start_video(self) -> None:
-        """Start a video call session."""
-        if not self._coordinator.device_config:
-            _LOGGER.warning("Cannot start video: device config not available")
-            return
-        try:
-            await self._coordinator.async_start_video(auto_timeout=False)
-        except Exception:
-            _LOGGER.exception("Failed to start intercom video")
+        """Handle push events — no auto-start; user controls video via button or automation."""

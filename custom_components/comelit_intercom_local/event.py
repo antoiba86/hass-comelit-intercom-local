@@ -66,4 +66,4 @@ class ComelitDoorbellEvent(EventEntity):
         if event.event_type in EVENT_TYPES:
             self._trigger_event(event.event_type, {"apt_address": event.apt_address})
             self.async_write_ha_state()
-            _LOGGER.debug("Doorbell event fired: %s", event.event_type)
+            _LOGGER.info("Doorbell event fired: %s", event.event_type)

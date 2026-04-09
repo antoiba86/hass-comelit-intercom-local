@@ -7,6 +7,7 @@ from collections.abc import Callable
 import contextlib
 import logging
 import random
+import socket
 import struct
 
 from .channels import Channel, ChannelType
@@ -55,6 +56,8 @@ class IconaBridgeClient:
 
     async def connect(self) -> None:
         """Open TCP connection to the device."""
+        import socket
+
         try:
             self._reader, self._writer = await asyncio.wait_for(
                 asyncio.open_connection(self.host, self.port),
@@ -64,6 +67,22 @@ class IconaBridgeClient:
             raise ConnectionComelitError(
                 f"Failed to connect to {self.host}:{self.port}: {e}"
             ) from e
+
+        # Enable TCP keepalives so the OS detects when the device goes to sleep
+        # without sending a FIN. Without this, the connection appears alive
+        # indefinitely and we never reconnect — missing doorbell ring events.
+        sock = self._writer.transport.get_extra_info("socket")
+        if sock is not None:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+            # Start probing after 60s idle, retry every 10s, drop after 3 failed
+            # probes — detects a dead connection in ~90s total.
+            if hasattr(socket, "TCP_KEEPIDLE"):
+                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 60)
+            if hasattr(socket, "TCP_KEEPINTVL"):
+                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 10)
+            if hasattr(socket, "TCP_KEEPCNT"):
+                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3)
+
         self._connected = True
         self._receive_task = asyncio.create_task(self._receive_loop())
         _LOGGER.debug("Connected to %s:%s", self.host, self.port)
@@ -125,12 +144,27 @@ class IconaBridgeClient:
         return request_id, body
 
     async def _receive_loop(self) -> None:
-        """Background task that reads packets and dispatches them."""
+        """Background task that reads packets and dispatches them.
+
+        Uses a 120s read timeout as an application-level dead-connection
+        detector. TCP keepalive socket options are unreliable inside Docker
+        containers, so we can't rely on the OS to close the socket when the
+        device goes to sleep without sending a FIN.
+        """
         _LOGGER.debug("Receive loop started")
         try:
             while self._connected:
                 _LOGGER.debug("Waiting for next packet...")
-                request_id, body = await self._read_packet()
+                try:
+                    request_id, body = await asyncio.wait_for(
+                        self._read_packet(), timeout=120.0
+                    )
+                except TimeoutError:
+                    _LOGGER.warning(
+                        "No data received for 120s — marking connection dead"
+                    )
+                    self._connected = False
+                    break
                 self._dispatch(request_id, body)
         except asyncio.IncompleteReadError:
             _LOGGER.info("Connection closed by device")

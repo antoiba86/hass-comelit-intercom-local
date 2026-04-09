@@ -180,9 +180,42 @@ class _CoordinatorEntity:
 
 _ha_update_coordinator.CoordinatorEntity = _CoordinatorEntity
 
+# Make homeassistant.core.callback a passthrough decorator (not a MagicMock)
+# so that @callback-decorated methods remain callable in tests.
+_ha.core.callback = lambda fn: fn
+
+# Stub for homeassistant.components.event
+class _EventEntity:
+    """Minimal stub for homeassistant.components.event.EventEntity."""
+
+    _attr_has_entity_name = False
+    _attr_name = None
+    _attr_unique_id = None
+    _attr_icon = None
+    _attr_event_types: list = []
+    _attr_translation_key: str | None = None
+
+    def __init__(self):
+        self._events: list = []
+
+    def _trigger_event(self, event_type: str, data: dict | None = None) -> None:
+        """Record triggered events (for test assertion)."""
+        self._events.append({"event_type": event_type, "data": data or {}})
+
+    def async_write_ha_state(self) -> None:
+        """No-op in tests."""
+
+    def async_on_remove(self, func) -> None:
+        """No-op in tests."""
+
+
+_ha_event = MagicMock()
+_ha_event.EventEntity = _EventEntity
+
 sys.modules["homeassistant.components"] = MagicMock()
 sys.modules["homeassistant.components.button"] = _ha_button
 sys.modules["homeassistant.components.camera"] = _ha_camera
+sys.modules["homeassistant.components.event"] = _ha_event
 sys.modules["homeassistant.helpers.entity"] = _ha_helpers_entity
 sys.modules["homeassistant.helpers.entity_platform"] = _ha_entity_platform
 

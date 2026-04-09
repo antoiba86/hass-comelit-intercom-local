@@ -137,37 +137,12 @@ def test_on_push_skips_when_already_active(camera):
     camera.hass.async_create_task.assert_not_called()
 
 
-def test_on_push_starts_video_when_inactive(camera):
-    """_on_push starts video if no active session."""
+def test_on_push_does_not_auto_start_video(camera):
+    """_on_push no longer auto-starts video — user controls video via button or automation."""
     camera._coordinator.video_session = None
     camera.hass = MagicMock()
 
     event = PushEvent(event_type="doorbell_ring")
     camera._on_push(event)
 
-    camera.hass.async_create_task.assert_called_once()
-
-
-# ---------------------------------------------------------------------------
-# _start_video
-# ---------------------------------------------------------------------------
-
-@pytest.mark.asyncio
-async def test_start_video_calls_coordinator(camera):
-    """_start_video calls coordinator.async_start_video with auto_timeout=False."""
-    camera._coordinator.async_start_video = AsyncMock()
-
-    await camera._start_video()
-
-    camera._coordinator.async_start_video.assert_called_once_with(auto_timeout=False)
-
-
-@pytest.mark.asyncio
-async def test_start_video_skips_when_no_config(camera):
-    """_start_video returns early if device_config is not available."""
-    camera._coordinator.device_config = None
-    camera._coordinator.async_start_video = AsyncMock()
-
-    await camera._start_video()
-
-    camera._coordinator.async_start_video.assert_not_called()
+    camera.hass.async_create_task.assert_not_called()
