@@ -53,7 +53,7 @@ class ComelitDoorbellEvent(EventEntity):
             identifiers={(DOMAIN, self._entry_id)},
             manufacturer=MANUFACTURER,
             model=MODEL,
-            name="Comelit Intercom",
+            name=self._coordinator.device_name,
         )
 
     async def async_added_to_hass(self) -> None:

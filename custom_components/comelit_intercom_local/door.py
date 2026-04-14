@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 
-from .auth import authenticate
 from .channels import Channel, ChannelType
 from .client import IconaBridgeClient
 from .exceptions import DoorOpenError
@@ -20,33 +19,33 @@ from .protocol import (
 
 _LOGGER = logging.getLogger(__name__)
 
-DOOR_RESPONSE_TIMEOUT = 2.0
+# Responses to CTPP init and door-specific init are informational only —
+# the actual door relay is triggered by the fire-and-forget open+confirm
+# commands in Phase B/D.  The device does not respond to init messages
+# while a video session is active (it has one CTPP session per address),
+# so keeping this short avoids 4 × 2s = 8s of spurious waiting during
+# concurrent video.  0.5s is enough for the normal (no-video) case where
+# the device responds within a few hundred milliseconds.
+DOOR_RESPONSE_TIMEOUT = 0.5
 
 
 async def open_door(
-    host: str,
-    port: int,
-    token: str,
+    client: IconaBridgeClient,
     config: DeviceConfig,
     door: Door,
 ) -> None:
-    """Open a door using a fresh TCP connection.
+    """Open a door using the shared coordinator TCP connection.
 
-    Uses a fresh connection to avoid corrupting the persistent connection.
-    The full sequence:
-    1. Connect and authenticate
-    2. Open CTPP channel with apt address
-    3. Send init sequence
-    4. Send open + confirm
-    5. Send door-specific init
-    6. Send open + confirm again
-    7. Disconnect
+    Reuses the already-authenticated client so no second TCP connection
+    is opened (the device only accepts one at a time). The full sequence:
+    1. Open CTPP_DOOR channel with apt address
+    2. Send init sequence
+    3. Send open + confirm
+    4. Send door-specific init
+    5. Send open + confirm again
+    6. Release the channel (without disconnecting the shared client)
     """
-    client = IconaBridgeClient(host, port)
     try:
-        await client.connect()
-        await authenticate(client, token)
-
         if door.is_actuator:
             await _open_actuator(client, config, door)
         else:
@@ -56,7 +55,8 @@ async def open_door(
     except Exception as e:
         raise DoorOpenError(f"Failed to open door '{door.name}': {e}") from e
     finally:
-        await client.disconnect()
+        # Always release the channel so the next press can reopen it.
+        client.remove_channel("CTPP_DOOR")
 
 
 async def _open_regular_door(
@@ -68,7 +68,7 @@ async def _open_regular_door(
 
     # Open CTPP channel with apt address as extra data
     extra = f"{apt_addr}{apt_sub}"
-    channel = await client.open_channel("CTPP", ChannelType.CTPP, extra_data=extra)
+    channel = await client.open_channel("CTPP_DOOR", ChannelType.CTPP, extra_data=extra, wire_name="CTPP")
 
     # Phase A: CTPP init
     init_payload = encode_ctpp_init(apt_addr, apt_sub)
@@ -125,7 +125,7 @@ async def _open_actuator(
     apt_sub = config.apt_subaddress
 
     extra = f"{apt_addr}{apt_sub}"
-    channel = await client.open_channel("CTPP", ChannelType.CTPP, extra_data=extra)
+    channel = await client.open_channel("CTPP_DOOR", ChannelType.CTPP, extra_data=extra, wire_name="CTPP")
 
     # Phase A: CTPP init (same as regular door)
     init_payload = encode_ctpp_init(apt_addr, apt_sub)

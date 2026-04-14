@@ -9,7 +9,6 @@ import logging
 import struct
 import time
 
-from .auth import authenticate
 from .channels import Channel, ChannelType
 from .client import IconaBridgeClient
 from .exceptions import VideoCallError
@@ -20,6 +19,7 @@ from .protocol import (
     encode_call_init,
     encode_call_response_ack,
     encode_ctpp_init,
+    encode_door_open_during_video,
     encode_rtpc_link,
     encode_video_config,
     encode_video_config_resp,
@@ -45,48 +45,53 @@ _CTR_INCR_BOTH  = 0x01010000   # both byte[4] and byte[5] increment
 class VideoCallSession:
     """Manages the TCP signaling and UDP video for a video call.
 
-    Uses a fresh TCP connection (like door.py) to avoid corrupting
-    the persistent connection. The sequence (from PCAP analysis):
+    Uses the coordinator's shared IconaBridgeClient so video signaling
+    and VIP event listening coexist on a single TCP connection. The
+    sequence (from PCAP analysis):
 
-    1. Connect + authenticate
-    2. Open CTPP channel with apt address
-    3. Send CTPP init + call initiation
-    4. ACK device responses, wait for call acceptance
-    5. Open UDPM channel (trailing_byte=1) — extract token from response
-    6. Send codec negotiation
-    7. Open 2x RTPC channels (trailing_byte=1)
-    8. Send RTPC link (using RTPC1 request_id)
-    9. Send video config trigger (using RTPC2 request_id)
-    10. Start RTP receiver with dynamic IDs from channel setup
-    11. Auto-timeout after ~120s
+    1. Open CTPP channel with apt address (client already authenticated)
+    2. Send CTPP init + call initiation
+    3. ACK device responses, wait for call acceptance
+    4. Open UDPM channel (trailing_byte=1) — extract token from response
+    5. Send codec negotiation
+    6. Open 2x RTPC channels (trailing_byte=1)
+    7. Send RTPC link (using RTPC1 request_id)
+    8. Send video config trigger (using RTPC2 request_id)
+    9. Start RTP receiver with dynamic IDs from channel setup
+    10. Auto-timeout after ~120s
     """
+
+    # Channel names opened by start() — cleaned up on stop without
+    # disconnecting the shared client.
+    _VIDEO_CHANNEL_NAMES = ("CTPP", "CSPB", "UDPM", "RTPC", "RTPC2",
+                            "RTPC_DEVICE", "RTPC_DEVICE_REEST")
 
     def __init__(
         self,
-        host: str,
-        port: int,
-        token: str,
+        client: IconaBridgeClient,
         config: DeviceConfig,
         auto_timeout: bool = True,
         rtsp_server: LocalRtspServer | None = None,
         on_call_end: Callable[[], None] | None = None,
         on_timeout: Callable[[], None] | None = None,
     ) -> None:
-        self._host = host
-        self._port = port
-        self._token = token
+        self._client = client
         self._config = config
         self._auto_timeout = auto_timeout
         self._external_rtsp = rtsp_server is not None
         self._on_call_end = on_call_end
         self._on_timeout = on_timeout
-        self._client: IconaBridgeClient | None = None
         self._rtp_receiver: RtpReceiver | None = None
         self._rtsp_server: LocalRtspServer | None = rtsp_server
         self._timeout_task: asyncio.Task | None = None
         self._tcp_task: asyncio.Task | None = None
         self._ctpp_task: asyncio.Task | None = None
         self._active = False
+        # Shared CTPP counter — updated by _ctpp_monitor_loop and read by
+        # async_open_door_on_ctpp.  Protected by _ctpp_lock so door open and
+        # keepalive ACKs don't collide on the wire.
+        self._call_counter: int = 0
+        self._ctpp_lock: asyncio.Lock = asyncio.Lock()
 
     @property
     def active(self) -> bool:
@@ -224,13 +229,9 @@ class VideoCallSession:
         3. Wait for call ACK → codec ack → codec exchange (with UDP running)
         4. Open 2x RTPC → RTPC link → video config → device RTPC → start media
         """
-        client = IconaBridgeClient(self._host, self._port)
-        self._client = client
+        client = self._client
 
         try:
-            await client.connect()
-            await authenticate(client, self._token)
-
             apt_addr = self._config.apt_address
             apt_sub = self._config.apt_subaddress
             # our_addr = full address of the HA/app unit (apt_address + apt_subaddress)
@@ -246,19 +247,39 @@ class VideoCallSession:
                     "Video call may fail if device requires a distinct entrance address."
                 )
 
-            # Step 1: Open CTPP + CSPB channels (PCAP shows both are needed)
+            # Step 1: Open CTPP + CSPB channels (PCAP shows both are needed).
             # CRITICAL: Use ChannelType.UAUT (type=7) for ALL channels — the real
             # Android app uses type=7 for everything. Using CTPP=16 may cause the
             # device to handle video calls incorrectly.
-            ctpp = await client.open_channel(
-                "CTPP", ChannelType.UAUT, extra_data=our_addr
-            )
-            await client.open_channel("CSPB", ChannelType.UAUT)
-
-            # Step 2: CTPP init + ACK pair
-            init_ts = await self._run_ctpp_init(
-                client, ctpp, apt_addr, apt_sub, our_addr
-            )
+            #
+            # The Android app uses ONE CTPP channel for both VIP event registration
+            # and video call signaling (confirmed by APK analysis: native library
+            # manages a single CTPP channel, used for both doorbell events and
+            # answerCall/releaseCall). When the VIP listener was active, the
+            # coordinator renamed CTPP_VIP→"CTPP" so this session reuses the same
+            # already-registered device channel — no close/reopen, no second
+            # ctpp_init needed (registration was done by VIP listener at startup).
+            ctpp = client.get_channel("CTPP")
+            if ctpp is not None:
+                _LOGGER.debug(
+                    "Reusing CTPP channel from VIP listener (server_id=%d) — "
+                    "skipping ctpp_init (already registered)",
+                    ctpp.server_channel_id,
+                )
+                if client.get_channel("CSPB") is None:
+                    await client.open_channel("CSPB", ChannelType.UAUT)
+                # Use a fresh timestamp; call phase needs a different session ID
+                # from the VIP init phase (bytes 2-3 of the CTPP timestamp).
+                init_ts = self._ts()
+            else:
+                ctpp = await client.open_channel(
+                    "CTPP", ChannelType.UAUT, extra_data=our_addr
+                )
+                await client.open_channel("CSPB", ChannelType.UAUT)
+                # Step 2: CTPP init + ACK pair (only needed on a fresh channel)
+                init_ts = await self._run_ctpp_init(
+                    client, ctpp, apt_addr, apt_sub, our_addr
+                )
 
             # PCAP shows phone proceeds directly to call init after sending ACKs.
 
@@ -296,7 +317,7 @@ class VideoCallSession:
             # PCAP-verified: control_req_id = UDPM server_channel_id (device-assigned).
             control_req_id = udpm.server_channel_id
             receiver = RtpReceiver(
-                self._host, self._port,
+                client.host, client.port,
                 control_req_id=control_req_id,
                 media_req_id=0,  # set later after RTPC2 opens
                 udpm_token=udpm_token,
@@ -442,6 +463,7 @@ class VideoCallSession:
             # initial frames.  Start the CTPP monitor immediately after so
             # any device 0x1840 keepalives arriving during the readiness
             # wait are ACKed instead of lingering in the channel buffer.
+            self._call_counter = call_counter
             self._tcp_task = asyncio.create_task(
                 self._tcp_video_loop(client, rtpc2, receiver)
             )
@@ -539,10 +561,13 @@ class VideoCallSession:
                 await self._rtsp_server.stop()
             self._rtsp_server = None
 
-        client, self._client = self._client, None
+        # Release our channels back to the shared client but do NOT disconnect —
+        # the coordinator owns the TCP connection and other consumers (VIP
+        # listener, door open, PUSH) are still using it.
+        client = self._client
         if client:
-            with contextlib.suppress(Exception):
-                await client.disconnect()
+            for name in self._VIDEO_CHANNEL_NAMES:
+                client.remove_channel(name)
 
     @staticmethod
     async def _tcp_video_loop(
@@ -597,13 +622,14 @@ class VideoCallSession:
                 if msg_type == 0x1840:
                     if action == 0x0003:
                         # CALL_END: full media session restart on same TCP connection.
-                        # Simple RTPC_LINK-refresh does NOT work (device never reopens RTPC).
                         _LOGGER.debug("CTPP monitor: CALL_END received — re-establishing")
                         try:
-                            call_counter = await self._inline_reestablish(
-                                client, ctpp, our_addr, entrance_addr,
-                                rtpc1_server_id, media_req_id, call_counter,
-                            )
+                            async with self._ctpp_lock:
+                                call_counter = await self._inline_reestablish(
+                                    client, ctpp, our_addr, entrance_addr,
+                                    rtpc1_server_id, media_req_id, call_counter,
+                                )
+                                self._call_counter = call_counter
                             _LOGGER.debug("CTPP monitor: re-established, lease renewed")
                         except Exception:
                             _LOGGER.warning(
@@ -617,9 +643,11 @@ class VideoCallSession:
                             return
                     else:
                         # Keepalive (0x0000) or other 0x1840 — bare ACK
-                        call_counter += _CTR_INCR_BYTE4
-                        ack = encode_call_response_ack(our_addr, entrance_addr, call_counter)
-                        await client.send_binary(ctpp, ack)
+                        async with self._ctpp_lock:
+                            call_counter += _CTR_INCR_BYTE4
+                            self._call_counter = call_counter
+                            ack = encode_call_response_ack(our_addr, entrance_addr, call_counter)
+                            await client.send_binary(ctpp, ack)
                         _LOGGER.debug(
                             "CTPP monitor: ACKed 0x1840/0x%04X, counter=0x%08X",
                             action, call_counter,
@@ -773,6 +801,29 @@ class VideoCallSession:
             encode_answer_peer(our_addr, entrance_addr, call_counter),
         )
         _LOGGER.info("Answer peer/accept (0x70) sent — audio should start within ~400ms")
+
+    async def async_open_door_on_ctpp(
+        self, our_addr: str, entrance_addr: str, relay_index: int
+    ) -> None:
+        """Open a door by sending 0x1840/0x000D on the active video CTPP channel.
+
+        PCAP-verified: the Android app sends this single message on the existing
+        video CTPP channel — no separate channel open, no 6-step sequence.
+        The device ACKs with 0x1800/0x0000 and the relay activates.
+        """
+        ctpp = self._client.get_channel("CTPP")
+        if ctpp is None or not self._active:
+            raise RuntimeError("No active video CTPP channel")
+        async with self._ctpp_lock:
+            self._call_counter += _CTR_INCR_BYTE4
+            payload = encode_door_open_during_video(
+                our_addr, entrance_addr, self._call_counter, relay_index
+            )
+            await self._client.send_binary(ctpp, payload)
+        _LOGGER.info(
+            "Door open sent on video CTPP (relay=%d, counter=0x%08X)",
+            relay_index, self._call_counter,
+        )
 
     async def _auto_timeout_loop(self) -> None:
         """Automatically stop the session after VIDEO_SESSION_TIMEOUT."""

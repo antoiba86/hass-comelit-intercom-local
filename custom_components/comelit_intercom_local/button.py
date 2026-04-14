@@ -67,7 +67,7 @@ class ComelitDoorButton(CoordinatorEntity[ComelitLocalCoordinator], ButtonEntity
             identifiers={(DOMAIN, self._entry_id)},
             manufacturer=MANUFACTURER,
             model=MODEL,
-            name="Comelit Intercom",
+            name=self.coordinator.device_name,
         )
 
     async def async_press(self) -> None:
@@ -103,7 +103,7 @@ class ComelitStartVideoButton(CoordinatorEntity[ComelitLocalCoordinator], Button
             identifiers={(DOMAIN, self._entry_id)},
             manufacturer=MANUFACTURER,
             model=MODEL,
-            name="Comelit Intercom",
+            name=self.coordinator.device_name,
         )
 
     async def async_press(self) -> None:
@@ -143,7 +143,7 @@ class ComelitStopVideoButton(CoordinatorEntity[ComelitLocalCoordinator], ButtonE
             identifiers={(DOMAIN, self._entry_id)},
             manufacturer=MANUFACTURER,
             model=MODEL,
-            name="Comelit Intercom",
+            name=self.coordinator.device_name,
         )
 
     async def async_press(self) -> None:

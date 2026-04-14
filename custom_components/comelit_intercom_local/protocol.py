@@ -124,10 +124,15 @@ def encode_channel_open_response(request_id: int) -> bytes:
     return encode_header(len(body), 0) + bytes(body)
 
 
-def encode_channel_close(sequence: int) -> bytes:
-    """Encode an END (channel close) binary packet."""
+def encode_channel_close(sequence: int, server_channel_id: int = 0) -> bytes:
+    """Encode an END (channel close) binary packet.
+
+    server_channel_id: the device-assigned ID for the channel to close.
+    Included as request_id in the header so the device can identify which
+    channel is being closed and release its associated session state.
+    """
     body = struct.pack("<H", MessageType.END) + struct.pack("<H", sequence)
-    return encode_header(len(body), 0) + bytes(body)
+    return encode_header(len(body), server_channel_id) + bytes(body)
 
 
 def parse_command_response(body: bytes) -> tuple[int, int, int]:
@@ -264,6 +269,7 @@ ACTION_VIDEO_CONFIG = 0x001A
 ACTION_PEER = 0x0070       # "accept call" / peer (answer sequence msg 1)
 ACTION_CONFIG_ACK = 0x000E # supplemental config ACK (answer sequence msg 2)
 ACTION_HANGUP = 0x002D     # '-' = hangup
+ACTION_DOOR_OPEN = 0x000D  # door open on active video CTPP channel (PCAP-verified)
 
 
 def _build_ctpp_video_msg(
@@ -534,6 +540,41 @@ def encode_answer_config_ack(
     buf += b"\xff\xff\xff\xff"
     buf += _null_terminated(caller)
     buf += entrance_addr.encode("ascii") + b"\x00\x00"
+    return bytes(buf)
+
+
+def encode_door_open_during_video(
+    our_addr: str,
+    entrance_addr: str,
+    call_counter: int,
+    relay_index: int,
+) -> bytes:
+    """Encode a door open command for use on an active video CTPP channel.
+
+    PCAP-verified (camera_feed_with_open_door_local.pcap): during video the
+    Android app sends a SINGLE 0x1840/0x000D message on the existing video
+    CTPP channel — no separate channel open, no 6-step sequence.
+
+    Body structure (48 bytes):
+      [LE16 0x1840] [LE32 counter] [BE16 0x000D] [BE16 0x002D]
+      [entrance_addr padded to 10] [LE32 relay_index] [4× 0xFF]
+      [our_addr padded to 10] [entrance_addr padded to 10]
+
+    relay_index: the door's output_index from the device config (PCAP shows 1
+    for the only door on that device; use door.output_index for our device).
+    """
+    our_b  = our_addr.encode("ascii").ljust(10, b"\x00")[:10]
+    entr_b = entrance_addr.encode("ascii").ljust(10, b"\x00")[:10]
+    buf = bytearray()
+    buf += struct.pack("<H", 0x1840)
+    buf += struct.pack("<I", call_counter)
+    buf += struct.pack(">H", ACTION_DOOR_OPEN)
+    buf += struct.pack(">H", 0x002D)
+    buf += entr_b
+    buf += struct.pack("<I", relay_index)
+    buf += b"\xff\xff\xff\xff"
+    buf += our_b
+    buf += entr_b
     return bytes(buf)
 
 

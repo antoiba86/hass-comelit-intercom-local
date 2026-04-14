@@ -10,7 +10,7 @@ Home Assistant custom component for the **Comelit 6701W** WiFi video intercom. C
 custom_components/comelit_intercom_local/
   __init__.py        — HA integration setup; registers card JS static path + Lovelace resource
   config_flow.py     — UI config flow with auto token extraction
-  coordinator.py     — DataUpdateCoordinator (manages TCP connection + persistent RTSP server)
+  coordinator.py     — DataUpdateCoordinator (no poll; owns RTSP server + video session; fetches DeviceConfig once at setup via short-lived client)
   button.py          — Door open + Start/Stop video button entities
   camera.py          — Camera entities (intercom video gated on _video_ready_event; RTSP cameras)
   event.py           — Doorbell ring / missed call event entities
@@ -77,7 +77,7 @@ All communication is raw TCP on port **64100**. Every message has an 8-byte head
 1. **UAUT** — Authentication: open channel → send JSON access request with token → expect code 200
 2. **UCFG** — Configuration: request config → parse doors, cameras, apt_address
 3. **PUSH** — Notifications: receive unsolicited JSON on doorbell_ring / missed_call
-4. **CTPP** — Door control: 6-step binary sequence on a fresh TCP connection
+4. **CTPP** — Door control: two paths depending on context (see Door Control below)
 5. **UDPM/RTPC** — Video call signaling (uses `trailing_byte=1`)
 
 ### Critical Protocol Rules
@@ -87,7 +87,6 @@ All communication is raw TCP on port **64100**. Every message has an 8-byte head
 - **Request ID** starts semi-random (8000+) and increments per message
 - After channel open, server responds with `server_channel_id` used for subsequent messages
 - JSON messages use compact format: `separators=(",", ":")`
-- Door open uses a **fresh TCP connection** (not the main persistent one)
 
 ## Key Entities
 
@@ -106,6 +105,31 @@ All entities use `_attr_has_entity_name = True` with device name `"Comelit Inter
 Door `id` from device can be non-unique (e.g., both doors had id=0). The `index` field on the Door model is a sequential counter used for unique entity IDs.
 
 Entity IDs are persisted in HA's entity registry by `unique_id`. If upgrading from an older version with different IDs (e.g., `camera.intercom_video`), delete and re-add the integration or rename manually in Settings → Entities.
+
+## Door Control
+
+Two code paths depending on whether a video session is active:
+
+**Without video** (`door.py` — 6-step sequence on shared client):
+1. Open `CTPP_DOOR` channel (wire name `CTPP`) with apt address
+2. Send `encode_ctpp_init` — read 2 responses (optional, device may not respond)
+3. Send `encode_open_door` + `encode_open_door_confirm` (Phase B)
+4. Send `encode_door_init` — read 2 responses (optional)
+5. Send `encode_open_door` + `encode_open_door_confirm` again (Phase D)
+6. Release channel
+
+**With video active** (`video_call.py` — single message on existing CTPP channel):
+- PCAP-verified (`camera_feed_with_open_door_local.pcap`): the Android app sends a **single `0x1840/0x000D` message** on the video CTPP channel — no new channel, no 6-step sequence
+- `VideoCallSession.async_open_door_on_ctpp(our_addr, entrance_addr, relay_index)` — increments call counter under `_ctpp_lock`, sends `encode_door_open_during_video`
+- Device ACKs with `0x1800/0x0000`; relay activates immediately
+- `relay_index` = `door.output_index` (may need `+1` if device uses 1-indexed relays — verify on first test)
+
+**Body structure of `encode_door_open_during_video` (48 bytes):**
+```
+[LE16 0x1840] [LE32 counter] [BE16 0x000D] [BE16 0x002D]
+[entrance_addr padded to 10 bytes] [LE32 relay_index] [4× 0xFF]
+[our_addr padded to 10 bytes] [entrance_addr padded to 10 bytes]
+```
 
 ## Video Streaming
 

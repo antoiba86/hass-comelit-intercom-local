@@ -186,8 +186,11 @@ class VipEventListener:
         self._task = asyncio.create_task(self._listen_loop())
         _LOGGER.info("VIP event listener started on CTPP channel")
 
-    async def stop(self) -> None:
-        """Stop the listener and close the channel."""
+    async def stop_task(self) -> None:
+        """Cancel the listener task only — leave CTPP_VIP / CSPB_VIP channels
+        open in the client registry so the coordinator can rename them for
+        reuse by a video session (avoids closing/reopening the CTPP session).
+        """
         self._running = False
         if self._task and not self._task.done():
             self._task.cancel()
@@ -196,6 +199,13 @@ class VipEventListener:
             except asyncio.CancelledError:
                 pass
         self._task = None
+
+    async def stop(self) -> None:
+        """Stop the listener and release its channels (full shutdown)."""
+        await self.stop_task()
+        # Release channels so start() can reopen them after video ends.
+        self._client.remove_channel("CTPP_VIP")
+        self._client.remove_channel("CSPB_VIP")
 
     async def _listen_loop(self) -> None:
         """Read binary messages from the CTPP channel and dispatch events."""

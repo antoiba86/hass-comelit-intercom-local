@@ -15,7 +15,7 @@ from custom_components.comelit_intercom_local.coordinator import ComelitLocalCoo
 # ---------------------------------------------------------------------------
 
 
-def _make_coordinator() -> ComelitLocalCoordinator:
+def _make_coordinator(*, with_client: bool = False) -> ComelitLocalCoordinator:
     """Create a coordinator with all HA dependencies mocked out."""
     hass = MagicMock()
     hass.loop = asyncio.get_event_loop()
@@ -24,9 +24,23 @@ def _make_coordinator() -> ComelitLocalCoordinator:
     coordinator.host = "127.0.0.1"
     coordinator.port = 64100
     coordinator.token = "fake_token"
-    coordinator._client = None
+    coordinator.device_name = "Comelit Intercom"
+    # Mock config entry with options (notifications enabled by default)
+    config_entry = MagicMock()
+    config_entry.options = {"enable_notifications": True}
+    coordinator.config_entry = config_entry
+    # Client — some tests need a connected client
+    if with_client:
+        mock_client = MagicMock()
+        mock_client.connected = True
+        mock_client.rename_channel = MagicMock()
+        mock_client.remove_channel = MagicMock()
+        coordinator._client = mock_client
+    else:
+        coordinator._client = None
     coordinator._config = MagicMock()
     coordinator._video_session = None
+    coordinator._vip_listener = None
     coordinator._video_stopped_by_user = False
     coordinator._video_start_lock = asyncio.Lock()
     coordinator._video_ready_event = asyncio.Event()
@@ -52,9 +66,10 @@ class TestRequestVideoStop:
         coord.request_video_stop()
         assert coord.video_stopped_by_user is True
 
-    def test_async_start_video_resets_flag(self):
+    @pytest.mark.asyncio
+    async def test_async_start_video_resets_flag(self):
         """async_start_video must clear the stopped-by-user flag."""
-        coord = _make_coordinator()
+        coord = _make_coordinator(with_client=True)
         coord._video_stopped_by_user = True
 
         mock_session = MagicMock()
@@ -64,9 +79,7 @@ class TestRequestVideoStop:
             "custom_components.comelit_intercom_local.coordinator.VideoCallSession",
             return_value=mock_session,
         ):
-            asyncio.get_event_loop().run_until_complete(
-                coord.async_start_video(auto_timeout=True)
-            )
+            await coord.async_start_video(auto_timeout=True)
 
         assert coord.video_stopped_by_user is False
 
@@ -119,7 +132,7 @@ class TestAsyncStartVideo:
     @pytest.mark.asyncio
     async def test_start_video_sets_session(self):
         """async_start_video stores the new session in _video_session."""
-        coord = _make_coordinator()
+        coord = _make_coordinator(with_client=True)
         mock_session = MagicMock()
         mock_session.start = AsyncMock()
 
@@ -134,7 +147,7 @@ class TestAsyncStartVideo:
     @pytest.mark.asyncio
     async def test_start_video_fires_ready_event(self):
         """async_start_video sets _video_ready_event after session starts."""
-        coord = _make_coordinator()
+        coord = _make_coordinator(with_client=True)
         mock_session = MagicMock()
         mock_session.start = AsyncMock()
 
@@ -149,7 +162,7 @@ class TestAsyncStartVideo:
     @pytest.mark.asyncio
     async def test_start_video_drops_concurrent_call(self):
         """A second async_start_video while one is in progress is dropped, not queued."""
-        coord = _make_coordinator()
+        coord = _make_coordinator(with_client=True)
         started = asyncio.Event()
         unblock = asyncio.Event()
 
@@ -177,7 +190,7 @@ class TestAsyncStartVideo:
     @pytest.mark.asyncio
     async def test_start_video_resets_stopped_flag(self):
         """async_start_video clears _video_stopped_by_user before starting."""
-        coord = _make_coordinator()
+        coord = _make_coordinator(with_client=True)
         coord._video_stopped_by_user = True
         mock_session = MagicMock()
         mock_session.start = AsyncMock()

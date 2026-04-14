@@ -6,12 +6,26 @@
       }
     }
   },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Comelit Intercom Options",
+        "data": {
+          "enable_notifications": "Enable doorbell notifications"
+        },
+        "data_description": {
+          "enable_notifications": "Receive doorbell ring and missed call events from the intercom"
+        }
+      }
+    }
+  },
   "config": {
     "step": {
       "user": {
         "title": "Comelit Intercom Local",
         "description": "Connect to your Comelit 6701W intercom locally.",
         "data": {
+          "name": "Name",
           "host": "Host",
           "port": "ICONA Bridge port",
           "http_port": "HTTP port",
@@ -19,6 +33,7 @@
           "password": "Device password (to auto-extract token)"
         },
         "data_description": {
+          "name": "Friendly name for this intercom (leave empty to use the host IP)",
           "host": "IP address of your Comelit device",
           "port": "TCP port for ICONA Bridge protocol (default: 64100)",
           "http_port": "HTTP port for device web interface (default: 8080)",

@@ -30,7 +30,14 @@ class TestCounterIncrementConstants:
 class TestCleanup:
     @pytest.mark.asyncio
     async def test_cleanup_called_even_when_rtp_receiver_stop_raises(self):
-        """_cleanup must still disconnect the client even if rtp_receiver.stop() raises."""
+        """_cleanup must still clean up channels even if rtp_receiver.stop() raises.
+
+        VideoCallSession no longer owns the TCP connection — it uses the
+        coordinator's shared client and must NOT disconnect it.  Instead it
+        calls remove_channel() for each video channel name.
+        """
+        from custom_components.comelit_intercom_local.video_call import VideoCallSession
+
         session = VideoCallSession.__new__(VideoCallSession)
         session._active = True
         session._timeout_task = None
@@ -44,16 +51,20 @@ class TestCleanup:
         session._rtp_receiver = mock_receiver
 
         mock_client = MagicMock()
-        mock_client.disconnect = AsyncMock()
+        mock_client.remove_channel = MagicMock()
         session._client = mock_client
 
         # Should not raise
         await session._cleanup()
 
-        mock_client.disconnect.assert_awaited_once()
+        # disconnect must NOT be called — the coordinator owns the connection
+        mock_client.disconnect.assert_not_called()
+        # Each video channel name must be removed
+        removed = {call.args[0] for call in mock_client.remove_channel.call_args_list}
+        assert "CTPP" in removed
+        assert "UDPM" in removed
         assert session._active is False
         assert session._rtp_receiver is None
-        assert session._client is None
 
     @pytest.mark.asyncio
     async def test_cleanup_cancels_timeout_task(self):
@@ -158,6 +169,8 @@ class TestCtppMonitorLoop:
         session._client = None
         session._rtsp_server = None
         session._external_rtsp = False
+        session._ctpp_lock = asyncio.Lock()
+        session._call_counter = 0
         return session
 
     @pytest.mark.asyncio

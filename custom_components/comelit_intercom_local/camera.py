@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from collections.abc import Callable
 
@@ -14,7 +13,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from .camera_utils import get_rtsp_url
 from .const import DOMAIN, MANUFACTURER, MODEL
 from .coordinator import ComelitLocalConfigEntry, ComelitLocalCoordinator
-from .models import Camera as CameraModel
+from .models import Camera as CameraModel, PushEvent
 from .placeholder import PLACEHOLDER_JPEG
 
 _LOGGER = logging.getLogger(__name__)
@@ -120,28 +119,19 @@ class ComelitIntercomCamera(Camera):
             identifiers={(DOMAIN, self._entry_id)},
             manufacturer=MANUFACTURER,
             model=MODEL,
-            name="Comelit Intercom",
+            name=self._coordinator.device_name,
         )
 
     async def stream_source(self) -> str | None:
-        """Return the RTSP URL, waiting briefly if a session is starting.
+        """Return the persistent RTSP URL.
 
-        If the user presses Start Video and opens the camera card
-        immediately, the CTPP handshake may still be in flight.
-        Rather than returning None (which makes HA fall back to JPEG
-        and never retry), wait up to 5s for the session to become
-        ready.  Returns None only if no session starts in time.
+        The RTSP server is always running after integration setup, so we always
+        return its URL — this lets go2rtc register the stream at HA startup and
+        keeps WebRTC available without waiting for an active call.  go2rtc
+        connects to the persistent server and receives frames as soon as a video
+        session is started (doorbell ring or Start Video button).
         """
-        if self._coordinator.video_session is not None:
-            return self._coordinator.rtsp_url
-        # Wait for an in-flight session to become ready
-        try:
-            await asyncio.wait_for(
-                self._coordinator._video_ready_event.wait(), timeout=5.0
-            )
-            return self._coordinator.rtsp_url
-        except TimeoutError:
-            return None
+        return self._coordinator.rtsp_url
 
     async def async_camera_image(
         self, width: int | None = None, height: int | None = None

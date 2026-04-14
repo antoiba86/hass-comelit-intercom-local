@@ -22,8 +22,11 @@ from .token import extract_token
 
 _LOGGER = logging.getLogger(__name__)
 
+CONF_ENABLE_NOTIFICATIONS = "enable_notifications"
+
 STEP_USER_DATA_SCHEMA = vol.Schema(
     {
+        vol.Optional("name", default=""): str,
         vol.Required(CONF_HOST): str,
         vol.Optional(CONF_PORT, default=DEFAULT_PORT): int,
         vol.Optional(CONF_HTTP_PORT, default=DEFAULT_HTTP_PORT): int,
@@ -38,6 +41,13 @@ class ComelitLocalConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     VERSION = 1
 
+    @staticmethod
+    def async_get_options_flow(
+        config_entry: config_entries.ConfigEntry,
+    ) -> config_entries.OptionsFlow:
+        """Return the options flow handler."""
+        return ComelitLocalOptionsFlow(config_entry)
+
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
     ) -> config_entries.ConfigFlowResult:
@@ -45,11 +55,13 @@ class ComelitLocalConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         errors: dict[str, str] = {}
 
         if user_input is not None:
+            name = user_input.get("name", "").strip()
             host = user_input[CONF_HOST]
             port = user_input[CONF_PORT]
             http_port = user_input.get(CONF_HTTP_PORT, DEFAULT_HTTP_PORT)
             token = user_input.get(CONF_TOKEN, "").strip()
             password = user_input.get(CONF_PASSWORD, "comelit")
+            title = name if name else f"Comelit {host}"
 
             # Auto-extract token if not provided
             if not token:
@@ -78,7 +90,7 @@ class ComelitLocalConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 self._abort_if_unique_id_configured()
 
                 return self.async_create_entry(
-                    title=f"Comelit {host}",
+                    title=title,
                     data={
                         CONF_HOST: host,
                         CONF_PORT: port,
@@ -91,4 +103,26 @@ class ComelitLocalConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             step_id="user",
             data_schema=STEP_USER_DATA_SCHEMA,
             errors=errors,
+        )
+
+
+class ComelitLocalOptionsFlow(config_entries.OptionsFlow):
+    """Handle options for Comelit Local (e.g. enable/disable notifications)."""
+
+    def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
+        self._config_entry = config_entry
+
+    async def async_step_init(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
+        """Show the options form."""
+        if user_input is not None:
+            return self.async_create_entry(title="", data=user_input)
+
+        current = self._config_entry.options.get(CONF_ENABLE_NOTIFICATIONS, True)
+        return self.async_show_form(
+            step_id="init",
+            data_schema=vol.Schema(
+                {vol.Required(CONF_ENABLE_NOTIFICATIONS, default=current): bool}
+            ),
         )

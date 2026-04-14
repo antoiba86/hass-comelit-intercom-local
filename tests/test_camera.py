@@ -82,7 +82,7 @@ async def test_camera_image_returns_frame_when_active(camera):
 
 @pytest.mark.asyncio
 async def test_stream_source_returns_url_when_session_active(camera):
-    """stream_source returns RTSP URL immediately when a session exists."""
+    """stream_source returns RTSP URL when a session exists."""
     camera._coordinator.video_session = MagicMock()
     camera._coordinator.rtsp_url = "rtsp://127.0.0.1:12345/intercom"
 
@@ -91,33 +91,26 @@ async def test_stream_source_returns_url_when_session_active(camera):
 
 
 @pytest.mark.asyncio
-async def test_stream_source_returns_none_when_no_session_and_timeout(camera):
-    """stream_source returns None when no session starts within the timeout."""
-    camera._coordinator.video_session = None
-    # Patch wait_for to immediately raise TimeoutError so the test doesn't
-    # actually sleep for the full 5s internal timeout.
-    with patch(
-        "custom_components.comelit_intercom_local.camera.asyncio.wait_for",
-        side_effect=TimeoutError,
-    ):
-        url = await camera.stream_source()
-    assert url is None
+async def test_stream_source_always_returns_url(camera):
+    """stream_source always returns the RTSP URL — no session required.
 
-
-@pytest.mark.asyncio
-async def test_stream_source_returns_url_when_event_fires(camera):
-    """stream_source returns RTSP URL once _video_ready_event is set."""
+    The RTSP server is persistent, so go2rtc can connect at startup without
+    waiting for an active video call.
+    """
     camera._coordinator.video_session = None
     camera._coordinator.rtsp_url = "rtsp://127.0.0.1:12345/intercom"
 
-    async def set_event_soon():
-        await asyncio.sleep(0.05)
-        camera._coordinator._video_ready_event.set()
-
-    asyncio.create_task(set_event_soon())
-
     url = await camera.stream_source()
     assert url == "rtsp://127.0.0.1:12345/intercom"
+
+
+@pytest.mark.asyncio
+async def test_stream_source_returns_none_when_rtsp_url_is_none(camera):
+    """stream_source returns None only if the coordinator has no RTSP URL yet."""
+    camera._coordinator.rtsp_url = None
+
+    url = await camera.stream_source()
+    assert url is None
 
 
 # ---------------------------------------------------------------------------

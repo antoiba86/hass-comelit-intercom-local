@@ -359,12 +359,18 @@ class IconaBridgeClient:
         return channel
 
     async def close_channel(self, name: str) -> None:
-        """Close a named channel."""
-        if name not in self._channels:
+        """Close a named channel.
+
+        Sends an END packet to the device using the channel's server_channel_id
+        as request_id so the device releases its associated session state (e.g.
+        CTPP VIP registration). Removes the channel from the local registry
+        before sending so the channel is always cleaned up even if send fails.
+        """
+        channel = self._channels.pop(name, None)
+        if channel is None:
             return
         seq = self._next_sequence()
-        await self._send(encode_channel_close(seq))
-        del self._channels[name]
+        await self._send(encode_channel_close(seq, channel.server_channel_id))
 
     async def send_json(self, channel: Channel, msg: dict) -> dict:
         """Send a JSON message on a channel and wait for JSON response.
@@ -444,6 +450,31 @@ class IconaBridgeClient:
         device-initiated channel opens (e.g. re-establishment RTPC channels).
         """
         self._channels.pop(name, None)
+
+    def remove_channel(self, name: str) -> None:
+        """Remove a channel from the registry without sending a close packet.
+
+        Used by VideoCallSession to clean up its channels when stopping,
+        without disconnecting the shared client.
+        """
+        self._channels.pop(name, None)
+
+    def rename_channel(self, old_name: str, new_name: str) -> None:
+        """Rename a channel in the registry without sending any packets.
+
+        Preserves the server_channel_id so the device keeps routing responses
+        to the same channel (now under a new local key). Used by the coordinator
+        to transfer CTPP_VIP ownership to the video session.
+        """
+        if old_name in self._channels:
+            channel = self._channels.pop(old_name)
+            channel.name = new_name
+            self._channels[new_name] = channel
+
+    def get_channel(self, name: str) -> "Channel | None":
+        """Return an open channel by name, or None if not open."""
+        ch = self._channels.get(name)
+        return ch if ch is not None and ch.is_open else None
 
     def set_push_callback(self, callback: Callable[[dict], None] | None) -> None:
         """Set a callback for push notifications (unsolicited JSON messages)."""

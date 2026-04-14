@@ -37,6 +37,16 @@ Home Assistant custom component for the **Comelit 6701W** WiFi video intercom. C
    - Your device password (token will be extracted automatically), or
    - A pre-extracted 32-character hex token
 
+### Notification settings
+
+After setup, you can configure the integration via **Settings → Integrations → Comelit Intercom Local → Configure**:
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| Enable notifications | On | Receive doorbell ring and door events. Disable if you only need video and door control, or to troubleshoot the notification connection. |
+
+Changing this setting reloads the integration automatically.
+
 ## Entities
 
 | Entity | Description |
@@ -150,7 +160,8 @@ The ICONA Bridge protocol runs over raw TCP on port 64100. Every message has an 
 Key operations:
 - **Authentication**: Open UAUT channel → send JSON access request with token → expect code 200
 - **Configuration**: Open UCFG channel → request config → parse doors, cameras, addresses
-- **Door open**: Open CTPP channel → 6-step binary sequence (init → open+confirm → door init → open+confirm)
+- **Door open (no video)**: Open CTPP channel → 6-step binary sequence (init → open+confirm → door init → open+confirm)
+- **Door open (during video)**: Single `0x1840/0x000D` message on the existing video CTPP channel — PCAP-verified from Android app local traffic capture
 - **Push notifications**: Open PUSH channel → receive unsolicited JSON on doorbell ring
 
 ## Changelog

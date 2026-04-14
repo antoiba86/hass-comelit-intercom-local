@@ -16,6 +16,7 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 
 from .auth import authenticate
 from .client import IconaBridgeClient
+from .config_flow import CONF_ENABLE_NOTIFICATIONS
 from .config_reader import get_device_config
 from .const import DOMAIN
 from .door import open_door
@@ -52,6 +53,7 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
         self.host = host
         self.port = port
         self.token = token
+        self.device_name = entry.title
         self._client: IconaBridgeClient | None = None
         self._config: DeviceConfig | None = None
         self._video_session: VideoCallSession | None = None
@@ -99,15 +101,18 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
 
         self._client = client
 
-        # Start VIP event listener for doorbell ring detection.
+        # Start VIP event listener for doorbell ring detection, unless disabled.
         # The PUSH channel is one-shot FCM registration; actual call events
         # arrive as binary VIP messages on the CTPP channel.
-        try:
-            vip = VipEventListener(client, self._config, self._on_push_event)
-            await vip.start()
-            self._vip_listener = vip
-        except Exception:
-            _LOGGER.warning("Failed to start VIP event listener", exc_info=True)
+        if self.config_entry.options.get(CONF_ENABLE_NOTIFICATIONS, True):
+            try:
+                vip = VipEventListener(client, self._config, self._on_push_event)
+                await vip.start()
+                self._vip_listener = vip
+            except Exception:
+                _LOGGER.warning("Failed to start VIP event listener", exc_info=True)
+        else:
+            _LOGGER.info("VIP event listener disabled via options")
 
         # Start persistent RTSP server so go2rtc can connect immediately
         if not self._rtsp_server:
@@ -125,6 +130,16 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
 
     async def _reconnect(self) -> None:
         """Tear down old connection and re-establish everything."""
+        # Stop any active video session before disconnecting — a concurrent
+        # session.start() holds a reference to the old client and will hang
+        # for READ_TIMEOUT (30s) waiting for channel opens that will never
+        # arrive once the TCP socket is closed.
+        if self._video_session:
+            with contextlib.suppress(Exception):
+                await self._video_session.stop(reason="reconnect")
+            self._video_session = None
+            self._video_ready_event.clear()
+
         if self._vip_listener:
             with contextlib.suppress(Exception):
                 await self._vip_listener.stop()
@@ -152,12 +167,13 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
 
         self._client = client
 
-        try:
-            vip = VipEventListener(client, self._config, self._on_push_event)
-            await vip.start()
-            self._vip_listener = vip
-        except Exception:
-            _LOGGER.warning("Failed to start VIP listener on reconnect", exc_info=True)
+        if self.config_entry.options.get(CONF_ENABLE_NOTIFICATIONS, True):
+            try:
+                vip = VipEventListener(client, self._config, self._on_push_event)
+                await vip.start()
+                self._vip_listener = vip
+            except Exception:
+                _LOGGER.warning("Failed to start VIP listener on reconnect", exc_info=True)
 
         _LOGGER.info("Comelit reconnected successfully")
 
@@ -197,10 +213,23 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
                 _LOGGER.exception("Error in push callback")
 
     async def async_open_door(self, door: Door) -> None:
-        """Open a door using a fresh connection."""
-        if not self._config:
-            raise RuntimeError("Not configured")
-        await open_door(self.host, self.port, self.token, self._config, door)
+        """Open a door.
+
+        During an active video session the CTPP channel is in use for video
+        signaling.  PCAP analysis shows the Android app sends a single
+        0x1840/0x000D message on the existing video CTPP channel instead of
+        the normal 6-step sequence — no new connection or channel needed.
+        """
+        if not self._config or not self._client:
+            raise RuntimeError("Not connected")
+        if self._video_session and self._video_session.active:
+            our_addr = f"{self._config.apt_address}{self._config.apt_subaddress}"
+            entrance_addr = self._config.caller_address or our_addr
+            await self._video_session.async_open_door_on_ctpp(
+                our_addr, entrance_addr, door.output_index
+            )
+        else:
+            await open_door(self._client, self._config, door)
 
     async def async_start_video(
         self, auto_timeout: bool = True
@@ -221,16 +250,45 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
             raise RuntimeError("Video start already in progress")
 
         async with self._video_start_lock:
+            if not self._client:
+                raise RuntimeError("Not connected")
+
+            # If the TCP connection died (120s receive-loop timeout) before the
+            # health-check interval had a chance to reconnect, reconnect now so
+            # we don't start a session on a dead socket and wait 30s for UDPM
+            # to time out.
+            if not self._client.connected:
+                _LOGGER.info("Client disconnected — reconnecting before video start")
+                try:
+                    await self._reconnect()
+                except Exception as err:
+                    raise RuntimeError(f"Reconnect failed: {err}") from err
+
             self._video_stopped_by_user = False
             await self.async_stop_video()
+
+            # Transfer VIP listener channels to the video session.
+            # The VIP CTPP_VIP channel is already registered on the device;
+            # renaming it to "CTPP" lets video reuse the same server_channel_id
+            # so device responses are still routed correctly — no close/reopen
+            # needed. The listen task is cancelled so VIP events are not
+            # dispatched during the video session; it restarts in async_stop_video.
+            if self._vip_listener:
+                with contextlib.suppress(Exception):
+                    await self._vip_listener.stop_task()
+                self._client.rename_channel("CTPP_VIP", "CTPP")
+                self._client.rename_channel("CSPB_VIP", "CSPB")
+                self._vip_listener = None
 
             t0 = time.monotonic()
             _LOGGER.info("Video session starting (CTPP setup)")
             session = VideoCallSession(
-                self.host, self.port, self.token, self._config,
+                self._client,
+                self._config,
                 auto_timeout=auto_timeout,
                 rtsp_server=self._rtsp_server,
                 on_call_end=self._on_video_call_end,
+                on_timeout=self._on_video_call_end,
             )
             # Publish the session ONLY after start() has completed its
             # readiness gate (first real NAL queued).  Publishing earlier
@@ -265,12 +323,31 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
         """Mark that the user explicitly requested video to stop."""
         self._video_stopped_by_user = True
 
+    async def _ensure_vip_listener(self) -> None:
+        """Start VIP listener if enabled and not already running."""
+        if self._vip_listener or not self._config or not self._client:
+            return
+        if not self.config_entry.options.get(CONF_ENABLE_NOTIFICATIONS, True):
+            return
+        try:
+            vip = VipEventListener(self._client, self._config, self._on_push_event)
+            await vip.start()
+            self._vip_listener = vip
+            _LOGGER.info("VIP event listener restarted")
+        except Exception:
+            _LOGGER.warning("Failed to restart VIP listener", exc_info=True)
+
     async def async_stop_video(self) -> None:
         """Stop the active video call session."""
         if self._video_session:
             await self._video_session.stop(reason="user stopped")
             self._video_session = None
             self._video_ready_event.clear()
+            # Restart VIP listener now that video released the CTPP slot.
+            # Skip if we're inside async_start_video (lock already held) —
+            # start_video will stop VIP again immediately anyway.
+            if not self._video_start_lock.locked():
+                await self._ensure_vip_listener()
 
     @property
     def video_session(self) -> VideoCallSession | None:
