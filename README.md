@@ -166,6 +166,23 @@ Key operations:
 
 ## Changelog
 
+### 0.1.4
+
+> **⚠ Breaking change — entity IDs have changed**
+>
+> Entity IDs are now derived from the integration's **title** instead of the hardcoded string `"Comelit Intercom"`.
+> If you added the integration before this version, your entity IDs may have changed (e.g. from
+> `button.comelit_intercom_actuator` to `button.comelit_192_168_1_111_actuator` if no custom name was set).
+>
+> **Fix:** remove and re-add the integration, giving it a friendly name (e.g. `Front Door`) in the new Name field.
+> Entities will then be stable going forward (e.g. `button.front_door_actuator`).
+
+- **Custom integration name** — new optional "Name" field in the config flow sets the integration title and entity prefix; leave blank to use the host IP
+- **Options flow** — enable or disable doorbell notifications after setup via Settings → Integrations → Configure without removing and re-adding the integration
+- **Door open during active video** — pressing a door button while video is active now sends a single message on the existing CTPP channel (PCAP-verified Android app behaviour) instead of opening a second TCP connection; faster and more reliable
+- **Single shared TCP connection** — video signaling and VIP event listening now share the coordinator's TCP connection; eliminates connection conflicts when the device only accepts one client at a time
+- **Persistent RTSP stream** — `stream_source()` always returns the RTSP URL so go2rtc can register the stream at HA startup without waiting for an active call
+
 ### 0.1.3
 - **Video renewal** — inline re-establishment on CALL_END (~30s) without TCP reconnect; video is uninterrupted
 - **Custom Lovelace card** — play-button UI auto-registered on HA startup; no manual resource configuration needed
