@@ -16,9 +16,8 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 
 from .auth import authenticate
 from .client import IconaBridgeClient
-from .config_flow import CONF_ENABLE_NOTIFICATIONS
 from .config_reader import get_device_config
-from .const import DOMAIN
+from .const import CONF_ENABLE_NOTIFICATIONS, DOMAIN
 from .door import open_door
 from .models import DeviceConfig, Door, PushEvent
 from .push import register_push
