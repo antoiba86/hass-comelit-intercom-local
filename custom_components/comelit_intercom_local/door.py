@@ -1,159 +1,125 @@
-"""Door open sequence via the CTPP channel."""
+"""Door open sequences via the shared CTPP channel."""
 
 from __future__ import annotations
 
 import logging
 
-from .channels import Channel, ChannelType
+from .channels import ChannelType
 from .client import IconaBridgeClient
+from .ctpp import ctpp_init_sequence
 from .exceptions import DoorOpenError
 from .models import DeviceConfig, Door
 from .protocol import (
     MessageType,
-    encode_actuator_init,
     encode_actuator_open,
-    encode_ctpp_init,
-    encode_door_init,
     encode_open_door,
 )
 
 _LOGGER = logging.getLogger(__name__)
 
-# Responses to CTPP init and door-specific init are informational only —
-# the actual door relay is triggered by the fire-and-forget open+confirm
-# commands in Phase B/D.  The device does not respond to init messages
-# while a video session is active (it has one CTPP session per address),
-# so keeping this short avoids 4 × 2s = 8s of spurious waiting during
-# concurrent video.  0.5s is enough for the normal (no-video) case where
-# the device responds within a few hundred milliseconds.
-DOOR_RESPONSE_TIMEOUT = 0.5
+# Timeout for CTPP init responses in the standalone (no-VIP) path.
+# The device responds quickly on a fresh CTPP session.
+DOOR_CTPP_INIT_TIMEOUT = 5.0
 
 
-async def open_door(
+async def open_door_fast(
     client: IconaBridgeClient,
     config: DeviceConfig,
     door: Door,
 ) -> None:
-    """Open a door using the shared coordinator TCP connection.
+    """Open a door by reusing the already-open CTPP channel.
 
-    Reuses the already-authenticated client so no second TCP connection
-    is opened (the device only accepts one at a time). The full sequence:
-    1. Open CTPP_DOOR channel with apt address
-    2. Send init sequence
-    3. Send open + confirm
-    4. Send door-specific init
-    5. Send open + confirm again
-    6. Release the channel (without disconnecting the shared client)
+    Used when the VIP listener has an active CTPP session (notifications ON,
+    no active video). Skips the init handshake entirely — the channel is
+    already registered with the device — and fires OPEN_DOOR + CONFIRM
+    directly (~30ms total).
     """
+    ctpp = client.get_channel("CTPP")
+    if ctpp is None:
+        raise DoorOpenError("CTPP channel not open — cannot use fast door open path")
+
     try:
         if door.is_actuator:
-            await _open_actuator(client, config, door)
+            await _send_actuator_open(client, ctpp, config.apt_address, door)
         else:
-            await _open_regular_door(client, config, door)
+            await _send_open_and_confirm(client, ctpp, config.apt_address, door)
+            await _send_open_and_confirm(client, ctpp, config.apt_address, door)
+        _LOGGER.info("Door '%s' opened successfully (fast path)", door.name)
+    except Exception as e:
+        raise DoorOpenError(f"Failed to open door '{door.name}': {e}") from e
 
-        _LOGGER.info("Door '%s' opened successfully", door.name)
+
+async def open_door_standalone(
+    client: IconaBridgeClient,
+    config: DeviceConfig,
+    door: Door,
+) -> None:
+    """Open a door by opening a transient CTPP channel with full init.
+
+    Used when no CTPP channel is currently open (notifications OFF, no active
+    video). Opens CTPP_DOOR, runs ctpp_init_sequence (gaining the proper ACK
+    pair that was missing in the old 6-step flow), sends OPEN_DOOR + CONFIRM,
+    then closes the channel.
+    """
+    apt_addr = config.apt_address
+    apt_sub = config.apt_subaddress
+    our_addr = f"{apt_addr}{apt_sub}"
+
+    try:
+        import time
+        ctpp = await client.open_channel(
+            "CTPP_DOOR", ChannelType.UAUT, extra_data=our_addr
+        )
+        await client.open_channel("CSPB_DOOR", ChannelType.UAUT)
+        ts = int(time.time()) & 0xFFFFFFFF
+        await ctpp_init_sequence(
+            client, ctpp, apt_addr, apt_sub, our_addr, ts,
+            response_timeout=DOOR_CTPP_INIT_TIMEOUT,
+        )
+
+        if door.is_actuator:
+            await _send_actuator_open(client, ctpp, apt_addr, door)
+        else:
+            await _send_open_and_confirm(client, ctpp, apt_addr, door)
+            await _send_open_and_confirm(client, ctpp, apt_addr, door)
+
+        _LOGGER.info("Door '%s' opened successfully (standalone path)", door.name)
     except Exception as e:
         raise DoorOpenError(f"Failed to open door '{door.name}': {e}") from e
     finally:
-        # Always release the channel so the next press can reopen it.
         client.remove_channel("CTPP_DOOR")
-
-
-async def _open_regular_door(
-    client: IconaBridgeClient, config: DeviceConfig, door: Door
-) -> None:
-    """Execute the regular door open sequence (6-step)."""
-    apt_addr = config.apt_address
-    apt_sub = config.apt_subaddress
-
-    # Open CTPP channel with apt address as extra data
-    extra = f"{apt_addr}{apt_sub}"
-    channel = await client.open_channel("CTPP_DOOR", ChannelType.CTPP, extra_data=extra, wire_name="CTPP")
-
-    # Phase A: CTPP init
-    init_payload = encode_ctpp_init(apt_addr, apt_sub)
-    await client.send_binary(channel, init_payload)
-    # Read 2 responses (timeout is OK)
-    resp = await client.read_response(channel, timeout=DOOR_RESPONSE_TIMEOUT)
-    _LOGGER.debug("CTPP init resp1: %s", resp.hex() if resp else None)
-    if resp is None:
-        _LOGGER.warning("No response to CTPP init (step 1)")
-    resp = await client.read_response(channel, timeout=DOOR_RESPONSE_TIMEOUT)
-    _LOGGER.debug("CTPP init resp2: %s", resp.hex() if resp else None)
-    if resp is None:
-        _LOGGER.warning("No response to CTPP init (step 2)")
-
-    # Phase B: Open door + confirm
-    await _send_open_and_confirm(client, channel, apt_addr, door)
-
-    # Phase C: Door-specific init
-    door_init = encode_door_init(apt_addr, door.output_index, door.apt_address)
-    await client.send_binary(channel, door_init)
-    resp = await client.read_response(channel, timeout=DOOR_RESPONSE_TIMEOUT)
-    _LOGGER.debug("Door init resp1: %s", resp.hex() if resp else None)
-    if resp is None:
-        _LOGGER.warning("No response to door init (step 1)")
-    resp = await client.read_response(channel, timeout=DOOR_RESPONSE_TIMEOUT)
-    _LOGGER.debug("Door init resp2: %s", resp.hex() if resp else None)
-    if resp is None:
-        _LOGGER.warning("No response to door init (step 2)")
-
-    # Phase D: Open door + confirm again
-    await _send_open_and_confirm(client, channel, apt_addr, door)
+        client.remove_channel("CSPB_DOOR")
 
 
 async def _send_open_and_confirm(
-    client: IconaBridgeClient, channel: Channel, apt_addr: str, door: Door
+    client: IconaBridgeClient,
+    channel,
+    apt_addr: str,
+    door: Door,
 ) -> None:
-    """Send OPEN_DOOR followed by OPEN_DOOR_CONFIRM."""
-    open_payload = encode_open_door(
-        MessageType.OPEN_DOOR, apt_addr, door.output_index, door.apt_address
+    """Send OPEN_DOOR followed by OPEN_DOOR_CONFIRM (fire-and-forget)."""
+    await client.send_binary(
+        channel,
+        encode_open_door(MessageType.OPEN_DOOR, apt_addr, door.output_index, door.apt_address),
     )
-    await client.send_binary(channel, open_payload)
-
-    confirm_payload = encode_open_door(
-        MessageType.OPEN_DOOR_CONFIRM, apt_addr, door.output_index, door.apt_address
+    await client.send_binary(
+        channel,
+        encode_open_door(MessageType.OPEN_DOOR_CONFIRM, apt_addr, door.output_index, door.apt_address),
     )
-    await client.send_binary(channel, confirm_payload)
 
 
-async def _open_actuator(
-    client: IconaBridgeClient, config: DeviceConfig, door: Door
+async def _send_actuator_open(
+    client: IconaBridgeClient,
+    channel,
+    apt_addr: str,
+    door: Door,
 ) -> None:
-    """Execute the actuator door open sequence."""
-    apt_addr = config.apt_address
-    apt_sub = config.apt_subaddress
-
-    extra = f"{apt_addr}{apt_sub}"
-    channel = await client.open_channel("CTPP_DOOR", ChannelType.CTPP, extra_data=extra, wire_name="CTPP")
-
-    # Phase A: CTPP init (same as regular door)
-    init_payload = encode_ctpp_init(apt_addr, apt_sub)
-    await client.send_binary(channel, init_payload)
-    resp = await client.read_response(channel, timeout=DOOR_RESPONSE_TIMEOUT)
-    _LOGGER.debug("CTPP init resp1: %s", resp.hex() if resp else None)
-    if resp is None:
-        _LOGGER.warning("No response to CTPP init (step 1)")
-    resp = await client.read_response(channel, timeout=DOOR_RESPONSE_TIMEOUT)
-    _LOGGER.debug("CTPP init resp2: %s", resp.hex() if resp else None)
-    if resp is None:
-        _LOGGER.warning("No response to CTPP init (step 2)")
-
-    # Actuator init
-    act_init = encode_actuator_init(apt_addr, door.output_index, door.apt_address)
-    await client.send_binary(channel, act_init)
-    resp = await client.read_response(channel, timeout=DOOR_RESPONSE_TIMEOUT)
-    _LOGGER.debug("Actuator init resp1: %s", resp.hex() if resp else None)
-    if resp is None:
-        _LOGGER.warning("No response to actuator init (step 1)")
-    resp = await client.read_response(channel, timeout=DOOR_RESPONSE_TIMEOUT)
-    _LOGGER.debug("Actuator init resp2: %s", resp.hex() if resp else None)
-    if resp is None:
-        _LOGGER.warning("No response to actuator init (step 2)")
-
-    # Actuator open + confirm
-    open_payload = encode_actuator_open(apt_addr, door.output_index, door.apt_address, confirm=False)
-    await client.send_binary(channel, open_payload)
-
-    confirm_payload = encode_actuator_open(apt_addr, door.output_index, door.apt_address, confirm=True)
-    await client.send_binary(channel, confirm_payload)
+    """Send actuator open followed by actuator confirm (fire-and-forget)."""
+    await client.send_binary(
+        channel,
+        encode_actuator_open(apt_addr, door.output_index, door.apt_address, confirm=False),
+    )
+    await client.send_binary(
+        channel,
+        encode_actuator_open(apt_addr, door.output_index, door.apt_address, confirm=True),
+    )

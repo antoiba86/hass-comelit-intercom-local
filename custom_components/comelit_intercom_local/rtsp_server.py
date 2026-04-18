@@ -37,11 +37,20 @@ import dataclasses
 import logging
 import socket
 import struct
+import time
 
 _LOGGER = logging.getLogger(__name__)
 
 _MAX_RTP_PAYLOAD = 1400  # bytes — safe MTU headroom
 _PCMA_SILENCE = bytes([0xD5] * 160)  # 20ms G.711 A-law silence
+
+# RTCP — seconds between 1900-01-01 (NTP epoch) and 1970-01-01 (Unix epoch).
+# Used to encode wall-clock time into the 64-bit NTP field of Sender Reports.
+_NTP_EPOCH_OFFSET = 2208988800
+# Sender Report period.  RFC 3550 suggests adapting based on bandwidth, but
+# 5 s is the conventional default and is enough for clients to lock their
+# reference clock within the first SR.
+_RTCP_SR_INTERVAL_S = 5.0
 
 # H.264 parameter sets captured from the Comelit 6701W (baseline profile,
 # level 3.1, 800x480 yuv420p — identical across every pcap we have).  Used as
@@ -138,8 +147,29 @@ class LocalRtspServer:
         self._audio_ssrc: int = 0xA0D10001
         self._session_id: str = "87654321"
 
+        # RTCP Sender Report state — running totals since the SSRC was
+        # created.  Clients use these together with the NTP/RTP timestamp
+        # pair to recover a reference clock; without them VLC, go2rtc and
+        # most browsers wait many seconds before showing the first frame
+        # ("no reference clock" / "PCR is called too late").  Counters are
+        # zeroed in reset() so a new call presents fresh statistics.
+        self._video_pkt_count: int = 0
+        self._video_octet_count: int = 0
+        self._audio_pkt_count: int = 0
+        self._audio_octet_count: int = 0
+        self._last_video_rtp_ts: int = 0
+        self._last_audio_rtp_ts: int = 0
+
         self._running = False
         self._feed_tasks: list[asyncio.Task] = []
+
+        # Gated by the coordinator: set when a video session is producing
+        # RTP, cleared during CTPP handshake and idle.  The PLAY handler
+        # awaits this event (with a short timeout) before responding 200
+        # OK, so HA's stream_worker stalls inside PLAY instead of erroring
+        # with "Stream ended; no additional packets" and taking a 10 s
+        # backoff when it reconnects into an in-flight handshake.
+        self._ready_event: asyncio.Event = asyncio.Event()
 
     @property
     def rtsp_url(self) -> str:
@@ -171,9 +201,12 @@ class LocalRtspServer:
         # Persistent feed tasks — run for the lifetime of the server.
         # Passthrough loop is lower latency; falls back to NAL-based
         # path automatically if rtp_queue is not fed.
+        # Audio is disabled — the device's answer sequence isn't producing
+        # PCMA in this deployment, and the silent keepalive at 1 Hz caused
+        # HLS/WebRTC stutters by ticking the 8 kHz audio clock 50× too slow.
         self._feed_tasks = [
             asyncio.create_task(self._video_rtp_passthrough_loop()),
-            asyncio.create_task(self._audio_feed_loop()),
+            asyncio.create_task(self._rtcp_sr_loop()),
         ]
 
         _LOGGER.info("RTSP server started: %s", self.rtsp_url)
@@ -204,6 +237,35 @@ class LocalRtspServer:
                 setattr(self, sock_attr, None)
 
         _LOGGER.debug("RTSP server stopped")
+
+    def mark_ready(self) -> None:
+        """Signal that a video session is flowing — unblocks pending PLAYs."""
+        self._ready_event.set()
+
+    def mark_not_ready(self) -> None:
+        """Signal that no session is flowing — future PLAYs will stall until ready."""
+        self._ready_event.clear()
+
+    def disconnect_clients(self) -> None:
+        """Close all active RTSP client connections to force immediate reconnect.
+
+        Called once a new video session is ready (first NAL received).
+        go2rtc stays connected during idle but tracks only audio — when
+        video frames start arriving on an existing audio-only connection,
+        go2rtc can take 20+ seconds to detect the new track.  Kicking it
+        forces a fresh DESCRIBE/PLAY against a stream that already has
+        video flowing, so it starts presenting frames within a few seconds.
+        """
+        clients = list(self._active_clients)
+        self._active_clients.clear()
+        for c in clients:
+            with contextlib.suppress(Exception):
+                c.writer.close()
+        if clients:
+            _LOGGER.debug(
+                "RTSP: disconnected %d client(s) — forcing reconnect on new video session",
+                len(clients),
+            )
 
     def reset(self, renewal: bool = False) -> None:
         """Reset for a new or renewed video call session.
@@ -248,6 +310,24 @@ class LocalRtspServer:
         # renewal because the audio clock lags behind the video stream.
         self._video_ts_out = max(self._video_ts_out, audio_ts_90k)
         self._video_ts_rebase_pending = True
+
+        # Reset RTCP counters — clients re-anchor their reference clock from
+        # the next Sender Report regardless, but presenting fresh stats per
+        # call avoids any spurious "loss" calculation on their side based on
+        # cumulative deltas across an idle period.
+        self._video_pkt_count = 0
+        self._video_octet_count = 0
+        self._audio_pkt_count = 0
+        self._audio_octet_count = 0
+
+        # Re-prime all already-connected clients with current SPS+PPS.
+        # New clients are primed in _prime_client_with_parameter_sets called
+        # from PLAY, but clients that stayed connected across sessions (e.g.
+        # the HA stream worker) don't reconnect and never see in-band parameter
+        # sets for the new call, so libx264 gets pix_fmt=-1 on the first keyframe.
+        for client in list(self._active_clients):
+            self._prime_client_with_parameter_sets(client)
+
         _LOGGER.debug(
             "RTSP server reset (renewal=%s): drained %d NALs + %d audio, "
             "%d client(s) remain, video_ts_out seeded to 0x%08X",
@@ -333,6 +413,30 @@ class LocalRtspServer:
                     ))
 
                 elif method == "PLAY":
+                    # Stall PLAY until a video session is actually flowing.
+                    # If a stream_worker reconnects while CTPP is still
+                    # negotiating, responding 200 OK immediately would hand
+                    # it a silent stream — it errors ~1.6 s later with
+                    # "Stream ended" and HA backs off 10 s before retrying.
+                    # Waiting inside PLAY (up to 10 s) keeps the worker in
+                    # its connect phase, so when video becomes ready it
+                    # transitions directly to reading frames.
+                    if not self._ready_event.is_set():
+                        _LOGGER.debug(
+                            "PLAY from %s waiting for video readiness",
+                            client_host,
+                        )
+                        try:
+                            await asyncio.wait_for(
+                                self._ready_event.wait(), timeout=10.0
+                            )
+                        except TimeoutError:
+                            writer.write(
+                                f"RTSP/1.0 503 Service Unavailable\r\n"
+                                f"CSeq: {cseq}\r\n\r\n".encode()
+                            )
+                            await writer.drain()
+                            break
                     self._send(writer, cseq, extra=(
                         f"Session: {self._session_id}\r\n"
                         f"Range: npt=0.000-\r\n"
@@ -445,10 +549,6 @@ class LocalRtspServer:
             f"profile-level-id={profile_level_id};"
             f"sprop-parameter-sets={sps_b64},{pps_b64}\r\n"
             "a=control:video\r\n"
-            "m=audio 0 RTP/AVP 8\r\n"
-            "c=IN IP4 0.0.0.0\r\n"
-            "a=rtpmap:8 PCMA/8000\r\n"
-            "a=control:audio\r\n"
         )
 
     async def _wait_for_teardown(self, reader: asyncio.StreamReader) -> None:
@@ -475,9 +575,16 @@ class LocalRtspServer:
         open libx264; if pix_fmt is unset at that moment, libx264 fails
         with "Invalid video pixel format: -1" on the first keyframe.
         Sending the cached SPS+PPS right after PLAY avoids that race.
+
+        Also emits a first RTCP Sender Report *before* the SPS/PPS so the
+        client gets an NTP↔RTP clock anchor before any RTP data arrives.
+        Without this, clients that connect mid-stream see RTP timestamps
+        far into the future and log "no reference clock" / "PCR is called
+        too late" until the next 5 s SR tick catches up.
         """
         if client.video_ch is None:
             return
+        self._send_initial_sr_to_client(client)
         for nal in (self._latest_sps, self._latest_pps):
             if not nal:
                 continue
@@ -497,6 +604,41 @@ class LocalRtspServer:
             "Primed RTSP client with SPS (%d B) + PPS (%d B)",
             len(self._latest_sps), len(self._latest_pps),
         )
+
+    def _send_initial_sr_to_client(self, client: _TcpClient) -> None:
+        """Send a one-shot video + audio SR to a single client before any RTP.
+
+        Gives mid-stream clients the NTP↔RTP clock anchor up-front so their
+        decoder does not stall while the 5 s periodic SR catches up.  Only
+        emits a per-stream SR if that stream has actually sent at least one
+        RTP packet — an SR advertising pkt_count=0 with rtp_ts=0 misleads
+        ffmpeg's demuxer and can trigger "Stream ended" errors.
+        """
+        ntp_secs, ntp_frac = _ntp_now()
+        if client.video_ch is not None and self._video_pkt_count > 0:
+            sr = _build_rtcp_sr(
+                ssrc=self._video_ssrc,
+                ntp_secs=ntp_secs, ntp_frac=ntp_frac,
+                rtp_ts=self._last_video_rtp_ts,
+                pkt_count=self._video_pkt_count,
+                octet_count=self._video_octet_count,
+            )
+            with contextlib.suppress(Exception):
+                client.writer.write(
+                    struct.pack("!BBH", 0x24, client.video_ch + 1, len(sr)) + sr
+                )
+        if client.audio_ch is not None and self._audio_pkt_count > 0:
+            sr = _build_rtcp_sr(
+                ssrc=self._audio_ssrc,
+                ntp_secs=ntp_secs, ntp_frac=ntp_frac,
+                rtp_ts=self._last_audio_rtp_ts,
+                pkt_count=self._audio_pkt_count,
+                octet_count=self._audio_octet_count,
+            )
+            with contextlib.suppress(Exception):
+                client.writer.write(
+                    struct.pack("!BBH", 0x24, client.audio_ch + 1, len(sr)) + sr
+                )
 
     def _broadcast_rtp(self, pkt: bytes, is_video: bool) -> None:
         """Send one RTP packet to every registered TCP client + UDP client.
@@ -596,6 +738,9 @@ class LocalRtspServer:
                 )
                 self._video_seq = (self._video_seq + 1) & 0xFFFF
                 self._broadcast_rtp(new_header + payload, is_video=True)
+                self._video_pkt_count += 1
+                self._video_octet_count += len(payload)
+                self._last_video_rtp_ts = self._video_ts_out
 
         except asyncio.CancelledError:
             pass
@@ -753,6 +898,9 @@ class LocalRtspServer:
             )
             self._video_seq = (self._video_seq + 1) & 0xFFFF
             self._broadcast_rtp(pkt, is_video=True)
+            self._video_pkt_count += 1
+            self._video_octet_count += len(nal_data)
+            self._last_video_rtp_ts = self._video_ts_out
         else:
             # FU-A fragmentation (RFC 6184 §5.8)
             nal_header = nal_data[0]
@@ -777,6 +925,9 @@ class LocalRtspServer:
                 )
                 self._video_seq = (self._video_seq + 1) & 0xFFFF
                 self._broadcast_rtp(pkt, is_video=True)
+                self._video_pkt_count += 1
+                self._video_octet_count += len(fragment)
+                self._last_video_rtp_ts = self._video_ts_out
                 first = False
 
     async def _audio_feed_loop(self) -> None:
@@ -801,11 +952,154 @@ class LocalRtspServer:
                 self._audio_seq = (self._audio_seq + 1) & 0xFFFF
                 self._audio_ts = (self._audio_ts + len(payload)) & 0xFFFFFFFF
                 self._broadcast_rtp(pkt, is_video=False)
+                self._audio_pkt_count += 1
+                self._audio_octet_count += len(payload)
+                self._last_audio_rtp_ts = self._audio_ts
 
         except asyncio.CancelledError:
             pass
         except Exception:
             _LOGGER.debug("Audio feed loop error", exc_info=True)
+
+    # ------------------------------------------------------------------
+    # RTCP — Sender Reports
+    # ------------------------------------------------------------------
+
+    async def _rtcp_sr_loop(self) -> None:
+        """Emit one RTCP Sender Report per stream every _RTCP_SR_INTERVAL_S.
+
+        RFC 3550 §6.4.1.  Without these, well-behaved clients (VLC, go2rtc,
+        browsers via MSE/WebRTC) cannot map RTP timestamps to wall-clock
+        time and stall their decoders for many seconds while they try to
+        infer a reference clock from RTP alone.
+        """
+        try:
+            # Wait until the first RTP packet has actually flowed, then emit
+            # the first SR immediately — clients that haven't seen an SR yet
+            # stall their decoders for seconds trying to infer a reference
+            # clock from RTP alone.  After that, cadence per RFC 3550.
+            while self._running and self._video_pkt_count == 0 and self._audio_pkt_count == 0:
+                await asyncio.sleep(0.05)
+
+            while self._running:
+                if self._active_clients or self._udp_host:
+                    ntp_secs, ntp_frac = _ntp_now()
+
+                    video_sr = _build_rtcp_sr(
+                        ssrc=self._video_ssrc,
+                        ntp_secs=ntp_secs,
+                        ntp_frac=ntp_frac,
+                        rtp_ts=self._last_video_rtp_ts,
+                        pkt_count=self._video_pkt_count,
+                        octet_count=self._video_octet_count,
+                    )
+                    self._broadcast_rtcp(video_sr, is_video=True)
+
+                    audio_sr = _build_rtcp_sr(
+                        ssrc=self._audio_ssrc,
+                        ntp_secs=ntp_secs,
+                        ntp_frac=ntp_frac,
+                        rtp_ts=self._last_audio_rtp_ts,
+                        pkt_count=self._audio_pkt_count,
+                        octet_count=self._audio_octet_count,
+                    )
+                    self._broadcast_rtcp(audio_sr, is_video=False)
+
+                await asyncio.sleep(_RTCP_SR_INTERVAL_S)
+
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            _LOGGER.debug("RTCP SR loop error", exc_info=True)
+
+    def _broadcast_rtcp(self, pkt: bytes, is_video: bool) -> None:
+        """Send one RTCP packet to every TCP and UDP client.
+
+        TCP path: interleaved on (video_ch | audio_ch) + 1 — RFC 2326 §10.12
+        reserves the odd interleaved channel of each pair for RTCP.
+        UDP path: send to (client_port + 1) — RFC 3550 §11 convention.
+        We reuse the existing RTP socket as the source; clients accept
+        RTCP from the RTP source port in practice.
+        """
+        dead: list[_TcpClient] = []
+        for c in self._active_clients:
+            ch = c.video_ch if is_video else c.audio_ch
+            if ch is None:
+                continue
+            if c.writer.is_closing():
+                dead.append(c)
+                continue
+            try:
+                c.writer.write(struct.pack("!BBH", 0x24, ch + 1, len(pkt)) + pkt)
+            except Exception:
+                dead.append(c)
+
+        for c in dead:
+            with contextlib.suppress(ValueError):
+                self._active_clients.remove(c)
+            with contextlib.suppress(Exception):
+                c.writer.close()
+
+        if self._udp_host:
+            port = self._udp_video_port if is_video else self._udp_audio_port
+            sock = self._video_sock if is_video else self._audio_sock
+            if port and sock:
+                with contextlib.suppress(OSError):
+                    sock.sendto(pkt, (self._udp_host, port + 1))
+
+
+def _ntp_now() -> tuple[int, int]:
+    """Return current wall-clock time as (NTP seconds, NTP fractional)."""
+    now = time.time()
+    secs = int(now) + _NTP_EPOCH_OFFSET
+    frac = int((now - int(now)) * (1 << 32)) & 0xFFFFFFFF
+    return secs, frac
+
+
+_CNAME = b"comelit@local"
+
+
+def _build_rtcp_sr(
+    ssrc: int,
+    ntp_secs: int,
+    ntp_frac: int,
+    rtp_ts: int,
+    pkt_count: int,
+    octet_count: int,
+) -> bytes:
+    """Build a compound RTCP packet: Sender Report + SDES (CNAME).
+
+    RFC 3550 §6.1 requires RTCP to be sent as a compound packet where the
+    first must be SR (or RR) and SDES CNAME MUST be present.  Strict clients
+    (VLC default build, gstreamer, some browsers) ignore a lone SR and keep
+    logging "no reference clock" until a CNAME arrives.
+    """
+    # --- SR (28 bytes) ----------------------------------------------------
+    # V=2, P=0, RC=0 -> 0x80; PT=200 (SR); length=6 (32-bit words minus 1).
+    sr = struct.pack(
+        "!BBHIIIIII",
+        0x80,
+        200,
+        6,
+        ssrc & 0xFFFFFFFF,
+        ntp_secs & 0xFFFFFFFF,
+        ntp_frac & 0xFFFFFFFF,
+        rtp_ts & 0xFFFFFFFF,
+        pkt_count & 0xFFFFFFFF,
+        octet_count & 0xFFFFFFFF,
+    )
+
+    # --- SDES with one chunk: SSRC + CNAME item + END, 32-bit padded ------
+    # SDES item: type=1 (CNAME), length=len(text), text bytes.
+    cname_item = struct.pack("!BB", 1, len(_CNAME)) + _CNAME
+    # Terminator item (type=0), then zero-pad to 32-bit boundary.
+    chunk = struct.pack("!I", ssrc & 0xFFFFFFFF) + cname_item + b"\x00"
+    pad = (-len(chunk)) & 3
+    chunk += b"\x00" * pad
+    sdes_len_words = len(chunk) // 4  # number of 32-bit words after header
+    # V=2, P=0, SC=1 -> 0x81; PT=202 (SDES); length = words_after_header.
+    sdes = struct.pack("!BBH", 0x81, 202, sdes_len_words) + chunk
+    return sr + sdes
 
 
 def _build_rtp(

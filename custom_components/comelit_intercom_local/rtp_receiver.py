@@ -7,6 +7,7 @@ import contextlib
 import io
 import logging
 import struct
+import time
 
 from .protocol import HEADER_SIZE, ICONA_BRIDGE_PORT
 
@@ -40,10 +41,6 @@ class _UdpProtocol(asyncio.DatagramProtocol):
         _LOGGER.debug("UDP socket connected: %s", transport.get_extra_info("sockname"))
 
     def datagram_received(self, data: bytes, addr: tuple[str, int]) -> None:
-        _LOGGER.debug(
-            "UDP packet received: %d bytes from %s:%d",
-            len(data), addr[0], addr[1],
-        )
         self._receiver._on_udp_packet(data)
 
     def error_received(self, exc: Exception) -> None:
@@ -130,6 +127,12 @@ class RtpReceiver:
         self._rtsp_audio_drops = 0
         self._pyav_nal_drops = 0
         self._last_drop_log_mono = 0.0
+
+        # IDR cadence tracking — one log line per keyframe with wall time
+        # and interval since the previous one.  Used to diagnose whether HA
+        # video freezes correlate with long GOPs.
+        self._idr_count: int = 0
+        self._last_idr_mono: float | None = None
 
     def attach_rtsp_queues(
         self,
@@ -330,6 +333,8 @@ class RtpReceiver:
                     b"\x00\x00\x00\x01" + reconstructed + nal_data[2:]
                 )
                 self._current_fua_ts = rtp_ts
+                if frag_type == 5:
+                    self._log_idr_arrival(rtp_ts)
             elif self._current_fua_nal:
                 # Continuation fragment
                 self._current_fua_nal.extend(nal_data[2:])
@@ -339,6 +344,8 @@ class RtpReceiver:
                 self._current_fua_nal = bytearray()
         elif 1 <= nal_type <= 23:
             # Other single NAL unit (IDR=5, non-IDR=1, etc.)
+            if nal_type == 5:
+                self._log_idr_arrival(rtp_ts)
             nal_bytes = b"\x00\x00\x00\x01" + nal_data
             self._queue_nal(rtp_ts, nal_bytes)
 
@@ -361,6 +368,24 @@ class RtpReceiver:
             except asyncio.QueueFull:
                 self._rtsp_audio_drops += 1
                 self._maybe_log_drops()
+
+    def _log_idr_arrival(self, rtp_ts: int) -> None:
+        """Log one line per incoming IDR keyframe with interval since previous.
+
+        Purpose: diagnose HA video freezes.  If IDRs arrive ~2 s apart, the
+        GOP is fine and freezes are elsewhere; if 5-10 s apart, segments
+        without keyframes are the cause.
+        """
+        now = time.monotonic()
+        self._idr_count += 1
+        interval = (
+            now - self._last_idr_mono if self._last_idr_mono is not None else 0.0
+        )
+        self._last_idr_mono = now
+        _LOGGER.debug(
+            "IDR #%d rtp_ts=0x%08X interval=%.2fs",
+            self._idr_count, rtp_ts, interval,
+        )
 
     def _queue_nal(self, rtp_ts: int, nal_bytes: bytes) -> None:
         """Queue a complete NAL unit for decoding and optional RTSP fanout.

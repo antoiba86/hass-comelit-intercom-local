@@ -18,7 +18,16 @@ class ComelitIntercomCard extends HTMLElement {
     super();
     this._hass = null;
     this._config = null;
-    this._playing = false;
+    // _streaming mirrors the camera entity state ("streaming" vs "idle").
+    // This is the source of truth for which view to show — driving the UI
+    // from a local flag caused picture-entity to be mounted before
+    // stream_source() had a URL ready, which made HA cache MJPEG as the
+    // transport and never upgrade to MSE/WebRTC.
+    this._streaming = false;
+    // _startRequested is set when the user presses play.  While true and
+    // camera state has not yet flipped to "streaming", we show a loading
+    // overlay instead of the play button — avoids a confusing double-click.
+    this._startRequested = false;
     this._liveCard = null;
     this._onLocationChanged = null;
     this.attachShadow({ mode: "open" });
@@ -39,7 +48,28 @@ class ComelitIntercomCard extends HTMLElement {
   set hass(hass) {
     this._hass = hass;
     if (this._liveCard) this._liveCard.hass = hass;
-    if (!this._playing) this._refreshThumbnail();
+    this._syncFromState();
+  }
+
+  _syncFromState() {
+    if (!this._hass || !this._config) return;
+    const state = this._hass.states[this._config.camera_entity];
+    const nowStreaming = state?.state === "streaming";
+    const firstSync = this._lastState === undefined;
+    const changed = nowStreaming !== this._streaming;
+    this._lastState = state?.state;
+    if (changed) {
+      this._streaming = nowStreaming;
+      if (nowStreaming) {
+        this._startRequested = false;
+        this._showLive();
+      } else {
+        this._showIdle();
+      }
+      return;
+    }
+    // Populate the thumbnail once on first render so the idle view isn't blank.
+    if (firstSync && !nowStreaming) this._refreshThumbnail();
   }
 
   connectedCallback() {
@@ -49,7 +79,7 @@ class ComelitIntercomCard extends HTMLElement {
     this._onLocationChanged = () => {
       setTimeout(() => {
         if (!this.isConnected || !this._isVisible()) {
-          this._stopVideo();
+          this._requestStop();
         }
       }, 0);
     };
@@ -59,7 +89,7 @@ class ComelitIntercomCard extends HTMLElement {
   disconnectedCallback() {
     window.removeEventListener("location-changed", this._onLocationChanged);
     this._onLocationChanged = null;
-    this._stopVideo();
+    this._requestStop();
   }
 
   getCardSize() {
@@ -128,6 +158,18 @@ class ComelitIntercomCard extends HTMLElement {
           margin-left: 5px; /* optical centering for play triangle */
         }
 
+        /* Loading spinner shown between play click and streaming state */
+        .loading-circle {
+          width: 72px;
+          height: 72px;
+          border-radius: 50%;
+          background: rgba(0, 0, 0, 0.55);
+          border: 2.5px solid rgba(255, 255, 255, 0.85);
+          border-top-color: transparent;
+          animation: spin 1s linear infinite;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+
         /* Live view — stream + stop button */
         .live { display: none; position: relative; }
         .stop-btn {
@@ -151,11 +193,11 @@ class ComelitIntercomCard extends HTMLElement {
       </style>
 
       <ha-card>
-        <!-- Idle state: snapshot + play button -->
+        <!-- Idle state: snapshot + play button (or spinner while starting) -->
         <div class="idle" id="idle">
           <img class="thumbnail" id="thumbnail" />
-          <div class="play-btn">
-            <div class="play-circle">
+          <div class="play-btn" id="play-btn">
+            <div class="play-circle" id="play-circle">
               <!-- Material play icon -->
               <svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
             </div>
@@ -174,67 +216,91 @@ class ComelitIntercomCard extends HTMLElement {
     `;
 
     this.shadowRoot.getElementById("idle").addEventListener("click", () => {
-      this._startVideo();
+      this._requestStart();
     });
     this.shadowRoot.getElementById("stop-btn").addEventListener("click", (e) => {
       e.stopPropagation();
-      this._stopVideo();
-      this._pressStop();
+      this._requestStop();
     });
   }
 
   // -------------------------------------------------------------------------
-  // Video state
+  // Video state — the camera entity state ("streaming" vs "idle") is the
+  // source of truth; button presses are just triggers that ask the backend
+  // to flip it.  The card reacts through _syncFromState when state arrives.
   // -------------------------------------------------------------------------
 
-  async _startVideo() {
-    if (this._playing || !this._hass || !this._config) return;
-    this._playing = true;
+  _requestStart() {
+    if (this._streaming || this._startRequested) return;
+    if (!this._hass || !this._config || !this._config.start_entity) return;
+    this._startRequested = true;
+    this._showStartingSpinner();
+    this._hass.callService("button", "press", {
+      entity_id: this._config.start_entity,
+    });
+  }
 
-    if (this._config.start_entity) {
+  _requestStop() {
+    this._startRequested = false;
+    if (this._hass && this._config && this._config.stop_entity) {
       this._hass.callService("button", "press", {
-        entity_id: this._config.start_entity,
+        entity_id: this._config.stop_entity,
       });
     }
+  }
 
+  async _showLive() {
     // Build the inner live card using HA helpers so the element is fully
     // upgraded before setConfig is called (document.createElement alone
-    // returns an unupgraded element without setConfig).
+    // returns an unupgraded element without setConfig).  Built lazily here,
+    // not eagerly on play click, so stream_source() already has a URL —
+    // picture-entity then picks MSE/WebRTC instead of caching MJPEG.
+    const slot = this.shadowRoot.getElementById("stream-slot");
+    if (!slot) return;
+    slot.innerHTML = "";
     const helpers = await window.loadCardHelpers();
-    this._liveCard = await helpers.createCardElement({
+    const card = await helpers.createCardElement({
       type: "picture-entity",
       entity: this._config.camera_entity,
       camera_view: "live",
       show_name: false,
       show_state: false,
     });
-    this._liveCard.hass = this._hass;
-    this.shadowRoot.getElementById("stream-slot").appendChild(this._liveCard);
-
+    card.hass = this._hass;
+    // Guard against late arrival — if state flipped back to idle while we
+    // were awaiting the helpers, don't mount a stale live card.
+    if (!this._streaming) return;
+    this._liveCard = card;
+    slot.appendChild(card);
     this.shadowRoot.getElementById("idle").style.display = "none";
     this.shadowRoot.getElementById("live").style.display = "block";
   }
 
-  _stopVideo() {
-    if (!this._playing) return;
-    this._playing = false;
-
-    // Tear down the live card
+  _showIdle() {
+    // Fully tear down the live card — leaving picture-entity mounted after
+    // stream_source() starts returning None puts it in an infinite retry
+    // loop, which is what the user sees as "camera keeps trying to load".
     const slot = this.shadowRoot.getElementById("stream-slot");
     if (slot) slot.innerHTML = "";
     this._liveCard = null;
-
-    this.shadowRoot.getElementById("idle").style.display = "";
     this.shadowRoot.getElementById("live").style.display = "none";
+    this.shadowRoot.getElementById("idle").style.display = "";
+    this._showPlayButton();
     this._refreshThumbnail();
   }
 
-  _pressStop() {
-    if (this._hass && this._config && this._config.stop_entity) {
-      this._hass.callService("button", "press", {
-        entity_id: this._config.stop_entity,
-      });
-    }
+  _showStartingSpinner() {
+    const playBtn = this.shadowRoot.getElementById("play-circle");
+    if (!playBtn) return;
+    playBtn.className = "loading-circle";
+    playBtn.innerHTML = "";
+  }
+
+  _showPlayButton() {
+    const playBtn = this.shadowRoot.getElementById("play-circle");
+    if (!playBtn) return;
+    playBtn.className = "play-circle";
+    playBtn.innerHTML = '<svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>';
   }
 
   // -------------------------------------------------------------------------

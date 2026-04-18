@@ -91,26 +91,31 @@ async def test_stream_source_returns_url_when_session_active(camera):
 
 
 @pytest.mark.asyncio
-async def test_stream_source_always_returns_url(camera):
-    """stream_source always returns the RTSP URL — no session required.
-
-    The RTSP server is persistent, so go2rtc can connect at startup without
-    waiting for an active video call.
-    """
+async def test_stream_source_returns_none_when_no_session_and_timeout(camera):
+    """stream_source returns None when no session is active and the ready event times out."""
     camera._coordinator.video_session = None
     camera._coordinator.rtsp_url = "rtsp://127.0.0.1:12345/intercom"
 
-    url = await camera.stream_source()
-    assert url == "rtsp://127.0.0.1:12345/intercom"
+    # Patch wait_for as a real coroutine so the Event.wait() coroutine it
+    # receives is properly closed (avoids "was never awaited" RuntimeWarning).
+    async def _timeout(coro, timeout=None):
+        coro.close()
+        raise TimeoutError
+
+    with patch("custom_components.comelit_intercom_local.camera.asyncio.wait_for", _timeout):
+        url = await camera.stream_source()
+    assert url is None
 
 
 @pytest.mark.asyncio
-async def test_stream_source_returns_none_when_rtsp_url_is_none(camera):
-    """stream_source returns None only if the coordinator has no RTSP URL yet."""
-    camera._coordinator.rtsp_url = None
+async def test_stream_source_returns_url_when_ready_event_fires(camera):
+    """stream_source returns the RTSP URL once _video_ready_event is set."""
+    camera._coordinator.video_session = None
+    camera._coordinator.rtsp_url = "rtsp://127.0.0.1:12345/intercom"
+    camera._coordinator._video_ready_event.set()
 
     url = await camera.stream_source()
-    assert url is None
+    assert url == "rtsp://127.0.0.1:12345/intercom"
 
 
 # ---------------------------------------------------------------------------

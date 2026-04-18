@@ -25,10 +25,9 @@ import logging
 import struct
 import time
 
-from .channels import ChannelType
 from .client import IconaBridgeClient
 from .models import DeviceConfig, PushEvent
-from .protocol import encode_call_response_ack, encode_ctpp_init
+from .protocol import encode_call_response_ack
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -46,6 +45,7 @@ ACTION_CONNECTED = 0x0002          # Call was answered
 ACTION_DOOR_OPENED = 0x0003        # Door opened (OUT_INITIATED, confirmed by testing)
 ACTION_OUT_ALERTING = 0x0004       # Outgoing call is ringing
 ACTION_CLOSED = 0x0005             # Call ended
+ACTION_CALL_TERMINATED = 0x000A        # Call terminated by far end (seen after video stop)
 ACTION_REGISTRATION_RENEWAL = 0x0010  # Device keepalive — must ACK with 0x1800+0x1820
 
 # Minimum message size: prefix(2) + timestamp(4) + action(2) = 8
@@ -116,71 +116,19 @@ class VipEventListener:
         self._dedup_window: float = 10.0  # seconds
 
     async def start(self) -> None:
-        """Open CTPP + CSPB channels, send init, and start the listener task.
+        """Attach to the existing CTPP channel and start the listener task.
 
-        The PCAP shows the app always opens both CTPP and CSPB, then sends a
-        CTPP init (0x18C0 prefix) before any call. The init message is the
-        "registration" that tells the device to start sending VIP events.
-        Without it, the device never pushes events on the channel.
+        The coordinator opens and initialises the CTPP channel before calling
+        start(). This method simply looks it up and begins listening — no
+        channel open, no init, no ACK pair needed here.
         """
-        apt_addr = self._config.apt_address
-        apt_sub = self._config.apt_subaddress
-        vip_address = f"{apt_addr}{apt_sub}"
-
-        _LOGGER.info(
-            "Opening persistent CTPP + CSPB channels for VIP events (address=%s)",
-            vip_address,
-        )
-
-        # PCAP shows CTPP channels are opened with type=7 (UAUT), not 16 (CTPP).
-        # The device uses the channel NAME to determine purpose, not the type ID.
-        self._channel = await self._client.open_channel(
-            "CTPP_VIP",
-            ChannelType.UAUT,
-            extra_data=vip_address,
-            wire_name="CTPP",
-        )
-
-        # CSPB channel — always opened alongside CTPP in the app (PCAP-verified).
-        await self._client.open_channel("CSPB_VIP", ChannelType.UAUT, wire_name="CSPB")
-
-        # Send CTPP init — this is the registration message that primes the
-        # device to send VIP events on this channel. Without it, opening the
-        # channel alone is not enough (confirmed by testing).
-        init_ts = int(time.time()) & 0xFFFFFFFF
-        init_msg = encode_ctpp_init(apt_addr, apt_sub, init_ts)
-        await self._client.send_binary(self._channel, init_msg)
-        _LOGGER.info("VIP: sent CTPP init (ts=0x%08X)", init_ts)
-
-        # Wait for device responses (ACK + confirm) and send our ACKs.
-        # The device typically sends 2 responses after init.
-        for i in range(2):
-            try:
-                resp = await asyncio.wait_for(
-                    self._channel.response_queue.get(), timeout=10.0
-                )
-                if resp and len(resp) >= 2:
-                    msg_type = struct.unpack_from("<H", resp, 0)[0]
-                    _LOGGER.info(
-                        "VIP init response %d: %d bytes, type=0x%04X",
-                        i + 1, len(resp), msg_type,
-                    )
-            except TimeoutError:
-                _LOGGER.warning("VIP init: timeout waiting for response %d", i + 1)
-                break
-
-        # Send ACK pair (0x1800 + 0x1820) to complete the handshake.
-        # Uses our_addr (with sub) as caller, apt_addr (without sub) as callee.
-        ack_ts = (init_ts + 0x01000000) & 0xFFFFFFFF
-        await self._client.send_binary(
-            self._channel,
-            encode_call_response_ack(vip_address, apt_addr, ack_ts),
-        )
-        await self._client.send_binary(
-            self._channel,
-            encode_call_response_ack(vip_address, apt_addr, ack_ts, prefix=0x1820),
-        )
-        _LOGGER.info("VIP: sent ACK pair (ts=0x%08X)", ack_ts)
+        ctpp = self._client.get_channel("CTPP")
+        if ctpp is None:
+            raise RuntimeError(
+                "CTPP channel not open — coordinator must call _open_ctpp_channels() "
+                "before starting the VIP listener"
+            )
+        self._channel = ctpp
 
         self._running = True
         self._task = asyncio.create_task(self._listen_loop())
@@ -201,11 +149,8 @@ class VipEventListener:
         self._task = None
 
     async def stop(self) -> None:
-        """Stop the listener and release its channels (full shutdown)."""
+        """Stop the listener task. Channels are owned by the coordinator."""
         await self.stop_task()
-        # Release channels so start() can reopen them after video ends.
-        self._client.remove_channel("CTPP_VIP")
-        self._client.remove_channel("CSPB_VIP")
 
     async def _listen_loop(self) -> None:
         """Read binary messages from the CTPP channel and dispatch events."""
@@ -235,14 +180,29 @@ class VipEventListener:
         action = msg["action"]
         addresses = msg["addresses"]
 
-        _LOGGER.info(
-            "VIP event: prefix=0x%04X action=0x%04X flags=0x%04X addrs=%s (%d bytes)",
-            prefix,
-            action,
-            msg.get("flags", 0),
-            addresses,
-            len(data),
+        # Log at INFO only for events that represent real VIP activity:
+        # 0x18C0 (call init / doorbell), 0x1860 with a meaningful action.
+        # 0x1840 messages and 0x1860/0x000A (CALL_TERMINATED) are video tail
+        # traffic that floods the log after video stops — keep those at DEBUG.
+        _is_real_vip = prefix == PREFIX_CALL_INIT or (
+            prefix == PREFIX_VIP_EVENT and action not in (0x0000, ACTION_CALL_TERMINATED)
         )
+        if _is_real_vip:
+            _LOGGER.info(
+                "VIP event: prefix=0x%04X action=0x%04X flags=0x%04X addrs=%s (%d bytes)",
+                prefix,
+                action,
+                msg.get("flags", 0),
+                addresses,
+                len(data),
+            )
+        else:
+            _LOGGER.debug(
+                "VIP tail/keepalive: prefix=0x%04X action=0x%04X (%d bytes)",
+                prefix,
+                action,
+                len(data),
+            )
 
         if _LOGGER.isEnabledFor(logging.DEBUG):
             _LOGGER.debug("VIP raw: %s", data.hex())
@@ -254,10 +214,17 @@ class VipEventListener:
             await self._send_renewal_ack(msg)
             return
 
-        # 0x1860/0x0003 is a door-opened event. ACK it immediately so the
-        # device clears the channel state — without this the device stays
-        # "busy" for a few seconds, blocking the next ring.
-        if prefix == PREFIX_VIP_EVENT and action == ACTION_DOOR_OPENED:
+        # ACK call-init (0x18C0) messages so the device clears its alerting state.
+        # Without this ACK the device retransmits and the CTPP channel stays busy,
+        # causing the next video-start codec exchange to time out.
+        if prefix == PREFIX_CALL_INIT:
+            await self._send_event_ack(msg)
+
+        # ACK all call-phase (0x1840) and VIP FSM (0x1860) events.
+        # Device retransmits unacknowledged events with exponential backoff.
+        # Renewal (0x1860/0x0010) is handled above and returns early, so it
+        # won't reach this check.
+        if prefix in (PREFIX_EVENT, PREFIX_VIP_EVENT):
             await self._send_event_ack(msg)
 
         # Detect incoming call / doorbell ring.
@@ -319,7 +286,7 @@ class VipEventListener:
                 self._channel,
                 encode_call_response_ack(vip_address, apt_addr, ack_ts, prefix=0x1820),
             )
-            _LOGGER.info("VIP: sent renewal ACK pair (ts=0x%08X)", ack_ts)
+            _LOGGER.debug("VIP: sent renewal ACK pair (ts=0x%08X)", ack_ts)
         except Exception:
             _LOGGER.warning("VIP: failed to send renewal ACK", exc_info=True)
 

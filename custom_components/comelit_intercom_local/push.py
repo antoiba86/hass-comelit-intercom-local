@@ -53,6 +53,37 @@ async def register_push(
     _LOGGER.info("Push notifications registered")
 
 
+async def send_push_keepalive(
+    client: IconaBridgeClient,
+    config: DeviceConfig,
+) -> None:
+    """Re-send push-info registration on the existing PUSH channel as a keepalive probe.
+
+    The device responds to push-info with a JSON acknowledgement, which causes
+    a packet to arrive on the TCP connection and resets the 120s receive-loop
+    idle timer.  If the device is unreachable (gone to sleep, half-open socket)
+    the underlying send_json call will raise — the caller should handle that as
+    a dead connection.
+    """
+    channel = client.get_channel("PUSH")
+    if channel is None:
+        raise RuntimeError("PUSH channel not open")
+
+    msg = {
+        "apt-address": config.apt_address,
+        "apt-subaddress": config.apt_subaddress,
+        "bundle-id": BUNDLE_ID,
+        "message": "push-info",
+        "message-id": int(ViperMessageId.PUSH),
+        "os-type": "ios",
+        "profile-id": PROFILE_ID,
+        "device-token": DEVICE_TOKEN,
+        "message-type": "request",
+    }
+    await client.send_json(channel, msg)
+    _LOGGER.debug("Push keepalive sent")
+
+
 def _parse_push_event(raw: dict) -> PushEvent | None:
     """Parse a raw push notification JSON into a PushEvent.
 

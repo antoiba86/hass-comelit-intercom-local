@@ -6,7 +6,11 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from custom_components.comelit_intercom_local.push import _parse_push_event, register_push
+from custom_components.comelit_intercom_local.push import (
+    _parse_push_event,
+    register_push,
+    send_push_keepalive,
+)
 from custom_components.comelit_intercom_local.models import DeviceConfig, PushEvent
 
 
@@ -163,3 +167,63 @@ class TestRegisterPush:
         assert sent_msg["apt-address"] == "SB000006"
         assert sent_msg["apt-subaddress"] == "1"
         assert sent_msg["message"] == "push-info"
+
+
+# ---------------------------------------------------------------------------
+# send_push_keepalive
+# ---------------------------------------------------------------------------
+
+
+class TestSendPushKeepalive:
+    @pytest.mark.asyncio
+    async def test_raises_when_push_channel_not_open(self):
+        """send_push_keepalive raises RuntimeError when PUSH channel is None."""
+        client = MagicMock()
+        client.get_channel = MagicMock(return_value=None)
+        config = _make_device_config()
+
+        with pytest.raises(RuntimeError, match="PUSH channel not open"):
+            await send_push_keepalive(client, config)
+
+    @pytest.mark.asyncio
+    async def test_sends_push_info_on_existing_channel(self):
+        """send_push_keepalive sends push-info JSON on the already-open PUSH channel."""
+        channel = MagicMock()
+        client = MagicMock()
+        client.get_channel = MagicMock(return_value=channel)
+        client.send_json = AsyncMock(return_value={})
+        config = _make_device_config()
+
+        await send_push_keepalive(client, config)
+
+        client.send_json.assert_awaited_once()
+        sent_channel, sent_msg = client.send_json.call_args.args
+        assert sent_channel is channel
+        assert sent_msg["message"] == "push-info"
+
+    @pytest.mark.asyncio
+    async def test_keepalive_message_contains_apt_address(self):
+        """Keepalive message includes the device apt_address and subaddress."""
+        channel = MagicMock()
+        client = MagicMock()
+        client.get_channel = MagicMock(return_value=channel)
+        client.send_json = AsyncMock(return_value={})
+        config = _make_device_config()
+
+        await send_push_keepalive(client, config)
+
+        sent_msg = client.send_json.call_args.args[1]
+        assert sent_msg["apt-address"] == "SB000006"
+        assert sent_msg["apt-subaddress"] == "1"
+
+    @pytest.mark.asyncio
+    async def test_keepalive_propagates_send_error(self):
+        """A send failure propagates so the caller can detect dead connections."""
+        channel = MagicMock()
+        client = MagicMock()
+        client.get_channel = MagicMock(return_value=channel)
+        client.send_json = AsyncMock(side_effect=OSError("broken pipe"))
+        config = _make_device_config()
+
+        with pytest.raises(OSError):
+            await send_push_keepalive(client, config)

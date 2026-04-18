@@ -18,7 +18,6 @@ from custom_components.comelit_intercom_local.coordinator import ComelitLocalCoo
 def _make_coordinator(*, with_client: bool = False) -> ComelitLocalCoordinator:
     """Create a coordinator with all HA dependencies mocked out."""
     hass = MagicMock()
-    hass.loop = asyncio.get_event_loop()
     coordinator = ComelitLocalCoordinator.__new__(ComelitLocalCoordinator)
     coordinator.hass = hass
     coordinator.host = "127.0.0.1"
@@ -33,7 +32,7 @@ def _make_coordinator(*, with_client: bool = False) -> ComelitLocalCoordinator:
     if with_client:
         mock_client = MagicMock()
         mock_client.connected = True
-        mock_client.rename_channel = MagicMock()
+        mock_client.get_channel = MagicMock(return_value=None)
         mock_client.remove_channel = MagicMock()
         coordinator._client = mock_client
     else:
@@ -47,6 +46,9 @@ def _make_coordinator(*, with_client: bool = False) -> ComelitLocalCoordinator:
     coordinator._rtsp_server = None
     coordinator._rtsp_url = None
     coordinator._push_callbacks = {}
+    coordinator._on_stop_video = {}
+    coordinator._on_video_state_change = {}
+    coordinator._keepalive_task = None
     coordinator.logger = MagicMock()
     return coordinator
 
@@ -202,3 +204,187 @@ class TestAsyncStartVideo:
             await coord.async_start_video()
 
         assert coord._video_stopped_by_user is False
+
+
+# ---------------------------------------------------------------------------
+# Callback registration — add_stop_video_callback / add_video_state_change_callback
+# ---------------------------------------------------------------------------
+
+
+class TestCallbackRegistration:
+    @pytest.mark.asyncio
+    async def test_stop_video_callback_called_on_stop(self):
+        """Callbacks registered via add_stop_video_callback fire during async_stop_video."""
+        coord = _make_coordinator()
+        mock_session = MagicMock()
+        mock_session.stop = AsyncMock()
+        coord._video_session = mock_session
+
+        fired = []
+        async def cb():
+            fired.append(True)
+
+        coord.add_stop_video_callback(cb)
+        await coord.async_stop_video()
+
+        assert fired == [True]
+
+    @pytest.mark.asyncio
+    async def test_stop_video_callback_remove_works(self):
+        """The remove callable returned by add_stop_video_callback prevents future calls."""
+        coord = _make_coordinator()
+        mock_session = MagicMock()
+        mock_session.stop = AsyncMock()
+        coord._video_session = mock_session
+
+        fired = []
+        async def cb():
+            fired.append(True)
+
+        remove = coord.add_stop_video_callback(cb)
+        remove()
+        await coord.async_stop_video()
+
+        assert fired == []
+
+    @pytest.mark.asyncio
+    async def test_stop_video_callback_exception_does_not_abort_stop(self):
+        """An exception in a stop-video callback must not prevent the session from stopping."""
+        coord = _make_coordinator()
+        mock_session = MagicMock()
+        mock_session.stop = AsyncMock()
+        coord._video_session = mock_session
+
+        async def bad_cb():
+            raise RuntimeError("callback error")
+
+        coord.add_stop_video_callback(bad_cb)
+        await coord.async_stop_video()  # must not raise
+
+        mock_session.stop.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_video_state_change_callback_called_after_start(self):
+        """add_video_state_change_callback fires after async_start_video completes."""
+        coord = _make_coordinator(with_client=True)
+        mock_session = MagicMock()
+        mock_session.start = AsyncMock()
+
+        fired = []
+        async def cb():
+            fired.append(True)
+
+        coord.add_video_state_change_callback(cb)
+
+        with patch(
+            "custom_components.comelit_intercom_local.coordinator.VideoCallSession",
+            return_value=mock_session,
+        ):
+            await coord.async_start_video()
+
+        assert fired == [True]
+
+    @pytest.mark.asyncio
+    async def test_video_state_change_callback_called_after_stop(self):
+        """add_video_state_change_callback fires after async_stop_video completes."""
+        coord = _make_coordinator()
+        mock_session = MagicMock()
+        mock_session.stop = AsyncMock()
+        coord._video_session = mock_session
+
+        fired = []
+        async def cb():
+            fired.append(True)
+
+        coord.add_video_state_change_callback(cb)
+        await coord.async_stop_video()
+
+        assert fired == [True]
+
+    @pytest.mark.asyncio
+    async def test_video_state_change_callback_remove_works(self):
+        """The remove callable prevents future firings."""
+        coord = _make_coordinator(with_client=True)
+        mock_session = MagicMock()
+        mock_session.start = AsyncMock()
+
+        fired = []
+        async def cb():
+            fired.append(True)
+
+        remove = coord.add_video_state_change_callback(cb)
+        remove()
+
+        with patch(
+            "custom_components.comelit_intercom_local.coordinator.VideoCallSession",
+            return_value=mock_session,
+        ):
+            await coord.async_start_video()
+
+        assert fired == []
+
+
+# ---------------------------------------------------------------------------
+# async_open_door dispatch
+# ---------------------------------------------------------------------------
+
+
+class TestAsyncOpenDoor:
+    @pytest.mark.asyncio
+    async def test_uses_video_session_when_active(self):
+        """async_open_door delegates to video session when one is active."""
+        coord = _make_coordinator(with_client=True)
+        door = MagicMock()
+        door.output_index = 0
+
+        session = MagicMock()
+        session.active = True
+        session.async_open_door_on_ctpp = AsyncMock()
+        coord._video_session = session
+        coord._config.apt_address = "SB000006"
+        coord._config.apt_subaddress = 1
+        coord._config.caller_address = None
+
+        await coord.async_open_door(door)
+
+        session.async_open_door_on_ctpp.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_uses_fast_path_when_ctpp_open(self):
+        """async_open_door uses open_door_fast when CTPP is open but no video session."""
+        coord = _make_coordinator(with_client=True)
+        coord._client.get_channel = MagicMock(return_value=MagicMock())
+        door = MagicMock()
+
+        with patch(
+            "custom_components.comelit_intercom_local.coordinator.open_door_fast",
+            new_callable=AsyncMock,
+        ) as mock_fast:
+            await coord.async_open_door(door)
+
+        mock_fast.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_uses_standalone_path_when_no_ctpp(self):
+        """async_open_door uses open_door_standalone when no CTPP channel is open."""
+        coord = _make_coordinator(with_client=True)
+        coord._client.get_channel = MagicMock(return_value=None)
+        door = MagicMock()
+
+        with patch(
+            "custom_components.comelit_intercom_local.coordinator.open_door_standalone",
+            new_callable=AsyncMock,
+        ) as mock_standalone:
+            await coord.async_open_door(door)
+
+        mock_standalone.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_raises_when_not_connected(self):
+        """async_open_door raises RuntimeError when client is None."""
+        coord = _make_coordinator()
+        coord._client = None
+        door = MagicMock()
+
+        with pytest.raises(RuntimeError, match="Not connected"):
+            await coord.async_open_door(door)

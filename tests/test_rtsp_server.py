@@ -90,33 +90,22 @@ class TestBuildSdp:
         assert "m=video" in sdp
         assert "H264/90000" in sdp
 
-    def test_sdp_contains_audio_track(self):
-        server = LocalRtspServer()
-        sdp = server._build_sdp()
-        assert "m=audio" in sdp
-        assert "PCMA/8000" in sdp
-
     def test_sdp_video_pt96(self):
         server = LocalRtspServer()
         sdp = server._build_sdp()
         assert "RTP/AVP 96" in sdp
         assert "rtpmap:96 H264" in sdp
 
-    def test_sdp_audio_pt8(self):
-        server = LocalRtspServer()
-        sdp = server._build_sdp()
-        assert "RTP/AVP 8" in sdp
-        assert "rtpmap:8 PCMA" in sdp
-
     def test_sdp_video_control(self):
         server = LocalRtspServer()
         sdp = server._build_sdp()
         assert "a=control:video" in sdp
 
-    def test_sdp_audio_control(self):
+    def test_sdp_no_audio_track(self):
+        """SDP is video-only; audio is muxed on the same RTP stream."""
         server = LocalRtspServer()
         sdp = server._build_sdp()
-        assert "a=control:audio" in sdp
+        assert "m=audio" not in sdp
 
     def test_sdp_uses_bind_host(self):
         server = LocalRtspServer(bind_host="192.168.1.1")

@@ -45,6 +45,7 @@ class TestCleanup:
         session._ctpp_task = None
         session._rtsp_server = None
         session._external_rtsp = False
+        session._owns_ctpp = True  # session owns CTPP → cleanup must remove it
 
         mock_receiver = MagicMock()
         mock_receiver.stop = AsyncMock(side_effect=RuntimeError("stop failed"))

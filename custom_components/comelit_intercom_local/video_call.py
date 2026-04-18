@@ -11,6 +11,7 @@ import time
 
 from .channels import Channel, ChannelType
 from .client import IconaBridgeClient
+from .ctpp import ctpp_init_sequence
 from .exceptions import VideoCallError
 from .models import DeviceConfig
 from .protocol import (
@@ -18,7 +19,6 @@ from .protocol import (
     encode_call_ack,
     encode_call_init,
     encode_call_response_ack,
-    encode_ctpp_init,
     encode_door_open_during_video,
     encode_rtpc_link,
     encode_video_config,
@@ -87,6 +87,10 @@ class VideoCallSession:
         self._tcp_task: asyncio.Task | None = None
         self._ctpp_task: asyncio.Task | None = None
         self._active = False
+        # True when this session opened CTPP itself (notifications OFF).
+        # False when reusing the coordinator-opened channel (notifications ON).
+        # Determines whether _cleanup removes CTPP/CSPB from the client registry.
+        self._owns_ctpp: bool = False
         # Shared CTPP counter — updated by _ctpp_monitor_loop and read by
         # async_open_door_on_ctpp.  Protected by _ctpp_lock so door open and
         # keepalive ACKs don't collide on the wire.
@@ -115,35 +119,6 @@ class VideoCallSession:
     # ------------------------------------------------------------------
     # CTPP signaling helpers (shared by start() and _inline_reestablish)
     # ------------------------------------------------------------------
-
-    async def _run_ctpp_init(
-        self,
-        client: IconaBridgeClient,
-        ctpp: "Channel",
-        apt_addr: str,
-        apt_sub: int,
-        our_addr: str,
-    ) -> int:
-        """Run CTPP init + ACK pair. Returns the init_ts used."""
-        init_ts = self._ts()
-        await client.send_binary(ctpp, encode_ctpp_init(apt_addr, apt_sub, init_ts))
-        for _ in range(2):
-            resp = await client.read_response(ctpp, timeout=VIDEO_RESPONSE_TIMEOUT)
-            if resp and len(resp) >= 2:
-                msg_type = struct.unpack_from("<H", resp, 0)[0]
-                _LOGGER.debug(
-                    "CTPP init response: %d bytes, type=0x%04X",
-                    len(resp), msg_type,
-                )
-        ack_ts = (init_ts + _CTR_INCR_BOTH) & 0xFFFFFFFF
-        await client.send_binary(
-            ctpp, encode_call_response_ack(our_addr, apt_addr, ack_ts)
-        )
-        await client.send_binary(
-            ctpp,
-            encode_call_response_ack(our_addr, apt_addr, ack_ts, prefix=0x1820),
-        )
-        return init_ts
 
     async def _run_codec_exchange(
         self,
@@ -252,17 +227,15 @@ class VideoCallSession:
             # Android app uses type=7 for everything. Using CTPP=16 may cause the
             # device to handle video calls incorrectly.
             #
-            # The Android app uses ONE CTPP channel for both VIP event registration
-            # and video call signaling (confirmed by APK analysis: native library
-            # manages a single CTPP channel, used for both doorbell events and
-            # answerCall/releaseCall). When the VIP listener was active, the
-            # coordinator renamed CTPP_VIP→"CTPP" so this session reuses the same
-            # already-registered device channel — no close/reopen, no second
-            # ctpp_init needed (registration was done by VIP listener at startup).
+            # The coordinator opens and initialises CTPP at setup when notifications
+            # are enabled; this session reuses it directly. When notifications are
+            # disabled, no CTPP exists yet — open and init it here, and take
+            # ownership so _cleanup closes it when the session ends.
             ctpp = client.get_channel("CTPP")
             if ctpp is not None:
+                self._owns_ctpp = False
                 _LOGGER.debug(
-                    "Reusing CTPP channel from VIP listener (server_id=%d) — "
+                    "Reusing coordinator CTPP channel (server_id=%d) — "
                     "skipping ctpp_init (already registered)",
                     ctpp.server_channel_id,
                 )
@@ -272,13 +245,16 @@ class VideoCallSession:
                 # from the VIP init phase (bytes 2-3 of the CTPP timestamp).
                 init_ts = self._ts()
             else:
+                self._owns_ctpp = True
                 ctpp = await client.open_channel(
                     "CTPP", ChannelType.UAUT, extra_data=our_addr
                 )
                 await client.open_channel("CSPB", ChannelType.UAUT)
                 # Step 2: CTPP init + ACK pair (only needed on a fresh channel)
-                init_ts = await self._run_ctpp_init(
-                    client, ctpp, apt_addr, apt_sub, our_addr
+                init_ts = self._ts()
+                await ctpp_init_sequence(
+                    client, ctpp, apt_addr, apt_sub, our_addr, init_ts,
+                    response_timeout=VIDEO_RESPONSE_TIMEOUT,
                 )
 
             # PCAP shows phone proceeds directly to call init after sending ACKs.
@@ -564,9 +540,14 @@ class VideoCallSession:
         # Release our channels back to the shared client but do NOT disconnect —
         # the coordinator owns the TCP connection and other consumers (VIP
         # listener, door open, PUSH) are still using it.
+        # CTPP and CSPB are only removed when this session opened them itself
+        # (notifications OFF). When the coordinator opened them, they outlive
+        # the video session so the VIP listener can reattach afterwards.
         client = self._client
         if client:
             for name in self._VIDEO_CHANNEL_NAMES:
+                if name in ("CTPP", "CSPB") and not self._owns_ctpp:
+                    continue
                 client.remove_channel(name)
 
     @staticmethod
@@ -693,8 +674,10 @@ class VideoCallSession:
         )
 
         # 2. CTPP init + ACK pair (shared helper)
-        init_ts = await self._run_ctpp_init(
-            client, ctpp, apt_addr, apt_sub, our_addr
+        init_ts = self._ts()
+        await ctpp_init_sequence(
+            client, ctpp, apt_addr, apt_sub, our_addr, init_ts,
+            response_timeout=VIDEO_RESPONSE_TIMEOUT,
         )
 
         # 3. Placeholder for device's new RTPC channel

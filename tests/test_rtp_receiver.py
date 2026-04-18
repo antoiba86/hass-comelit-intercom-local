@@ -757,3 +757,50 @@ class TestAudioRouting:
 
         assert audio_q.empty()
         assert not receiver._nal_queue.empty()
+
+
+# ---------------------------------------------------------------------------
+# IDR tracking (_log_idr_arrival)
+# ---------------------------------------------------------------------------
+
+
+class TestIdrTracking:
+    def test_idr_count_starts_at_zero(self):
+        receiver = RtpReceiver("127.0.0.1")
+        assert receiver._idr_count == 0
+
+    def test_last_idr_mono_starts_none(self):
+        receiver = RtpReceiver("127.0.0.1")
+        assert receiver._last_idr_mono is None
+
+    def test_log_idr_arrival_increments_count(self):
+        receiver = RtpReceiver("127.0.0.1")
+        receiver._log_idr_arrival(0x12345678)
+        assert receiver._idr_count == 1
+        receiver._log_idr_arrival(0x12345679)
+        assert receiver._idr_count == 2
+
+    def test_log_idr_arrival_records_monotonic_time(self):
+        import time
+        receiver = RtpReceiver("127.0.0.1")
+        before = time.monotonic()
+        receiver._log_idr_arrival(0)
+        after = time.monotonic()
+        assert before <= receiver._last_idr_mono <= after
+
+    def test_log_idr_arrival_interval_zero_on_first_call(self, caplog):
+        import logging
+        receiver = RtpReceiver("127.0.0.1")
+        with caplog.at_level(logging.DEBUG, logger="custom_components.comelit_intercom_local.rtp_receiver"):
+            receiver._log_idr_arrival(0x10000000)
+        assert "IDR #1" in caplog.text
+        assert "interval=0.00s" in caplog.text
+
+    def test_log_idr_arrival_logs_at_debug(self, caplog):
+        import logging
+        receiver = RtpReceiver("127.0.0.1")
+        with caplog.at_level(logging.DEBUG, logger="custom_components.comelit_intercom_local.rtp_receiver"):
+            receiver._log_idr_arrival(0xABCDEF01)
+        # Must appear in DEBUG records, not only INFO+
+        debug_records = [r for r in caplog.records if r.levelno == logging.DEBUG]
+        assert any("IDR" in r.message for r in debug_records)
