@@ -8,39 +8,48 @@ Home Assistant custom component for the **Comelit 6701W** WiFi video intercom. C
 
 ```
 custom_components/comelit_intercom_local/
-  __init__.py        — HA integration setup; registers card JS static path + Lovelace resource
-  config_flow.py     — UI config flow with auto token extraction
-  coordinator.py     — DataUpdateCoordinator (no poll; owns RTSP server + video session; fetches DeviceConfig once at setup via short-lived client)
-  button.py          — Door open + Start/Stop video button entities
-  camera.py          — Camera entities (intercom video gated on _video_ready_event; RTSP cameras)
+  __init__.py        — HA integration setup; registers both card JS static paths + Lovelace resources
+  config_flow.py     — UI config flow with auto token extraction + options flow (enable_notifications)
+  coordinator.py     — DataUpdateCoordinator; owns shared TCP client, RTSP server, video session, VIP listener, keepalive loop
+  button.py          — Door open + Start/Stop video button entities; door button stops video after 10s delay
+  camera.py          — Camera entity; is_streaming property; stop-video + state-change callbacks
   event.py           — Doorbell ring / missed call event entities
   protocol.py        — Wire protocol: 8-byte header, message types, binary payloads
   channels.py        — Channel definitions (UAUT, UCFG, CTPP, PUSH)
-  client.py          — AsyncIO TCP client for ICONA Bridge
+  client.py          — AsyncIO TCP client for ICONA Bridge; TCP keepalives; 120s read timeout
   auth.py            — Authentication flow (UAUT channel)
   token.py           — Token extraction from device HTTP backup endpoint
   config_reader.py   — Device configuration retrieval (UCFG channel)
-  door.py            — Door open sequence (CTPP channel, 6-step binary)
-  push.py            — Push notification listener (PUSH channel)
+  ctpp.py            — Shared CTPP init/handshake sequence (ctpp_init_sequence); used by door, video, VIP listener
+  door.py            — Door open: open_door_fast (reuse open CTPP) + open_door_standalone (transient channel)
+  push.py            — Push notification listener (PUSH channel); send_push_keepalive
+  vip_listener.py    — Persistent VIP event listener on CTPP channel: doorbell_ring, door_opened, renewal ACK
   camera_utils.py    — Camera/RTSP URL discovery
-  video_call.py      — Video call signaling + answer sequence + inline re-establishment
-  rtp_receiver.py    — UDP/TCP RTP receiver: H.264 FU-A→PyAV→JPEG + PCMA audio routing
-  rtsp_server.py     — Local RTSP server: H.264 + PCMA → HA stream integration (multi-client)
+  video_call.py      — Video call signaling on shared client; owns/borrows CTPP; async_open_door_on_ctpp
+  rtp_receiver.py    — UDP/TCP RTP receiver: H.264 FU-A→PyAV→JPEG + PCMA audio routing; IDR logging
+  rtsp_server.py     — Local RTSP server: H.264; RTCP Sender Reports; PLAY gating; disconnect_clients
   models.py          — Data models (Door, Camera, DeviceConfig, PushEvent)
   exceptions.py      — Custom exceptions
   const.py           — Constants (domain, platforms, defaults)
   www/
-    comelit-intercom-card.js — Custom Lovelace card (play-button UI, auto-stop on navigation)
+    comelit-intercom-card.js   — Custom Lovelace card (play-button UI, auto-stop on navigation)
+    comelit-doorbell-card.js   — Doorbell notification card (ring alert, Answer/Dismiss, live stream)
 
 tests/
   test_protocol.py        — Unit tests for wire protocol
   test_client.py          — Unit tests for TCP client
+  test_ctpp.py            — Unit tests for ctpp_init_sequence
+  test_door.py            — Unit tests for open_door_fast / open_door_standalone
   test_rtp_receiver.py    — Unit tests for RTP receiver
   test_rtsp_server.py     — Unit tests for RTSP server
   test_video_call.py      — Unit tests for video call session
   test_video_signaling.py — Unit tests for video signaling protocol
   test_camera.py          — Unit tests for camera entity
   test_coordinator.py     — Unit tests for coordinator
+  test_vip_listener.py    — Unit tests for VIP event listener (39 tests)
+  test_event_entity.py    — Unit tests for doorbell event entity (14 tests)
+  test_button.py          — Unit tests for button entities
+  test_push.py            — Unit tests for push channel
   test_integration.py     — Integration tests (requires real device)
   conftest.py             — Shared fixtures
 
@@ -58,7 +67,7 @@ postman/             — Postman collection documenting HTTP + TCP requests
 uv pip install -e ".[dev]"
 
 # Run unit tests (no device needed)
-PYTHONPATH=. uv run python -m pytest tests/test_protocol.py tests/test_client.py tests/test_rtp_receiver.py tests/test_rtsp_server.py tests/test_video_call.py tests/test_video_signaling.py tests/test_camera.py tests/test_coordinator.py -v
+PYTHONPATH=. uv run python -m pytest tests/test_protocol.py tests/test_client.py tests/test_ctpp.py tests/test_door.py tests/test_rtp_receiver.py tests/test_rtsp_server.py tests/test_video_call.py tests/test_video_signaling.py tests/test_camera.py tests/test_coordinator.py tests/test_vip_listener.py tests/test_event_entity.py tests/test_button.py tests/test_push.py -v
 
 # Run integration tests (requires real device on LAN)
 COMELIT_HOST=192.168.1.111 COMELIT_TOKEN=<token> uv run python -m pytest tests/test_integration.py -v -s
@@ -76,8 +85,8 @@ All communication is raw TCP on port **64100**. Every message has an 8-byte head
 
 1. **UAUT** — Authentication: open channel → send JSON access request with token → expect code 200
 2. **UCFG** — Configuration: request config → parse doors, cameras, apt_address
-3. **PUSH** — Notifications: receive unsolicited JSON on doorbell_ring / missed_call
-4. **CTPP** — Door control: two paths depending on context (see Door Control below)
+3. **PUSH** — Notifications: registers FCM token; also used as keepalive probe (re-send push-info every 90s — device ACKs with JSON, resetting the idle timer)
+4. **CTPP** — Persistent channel for VIP events (doorbell ring, door opened) and door control; shared across VIP listener, video session, and standalone door open (see Door Control below)
 5. **UDPM/RTPC** — Video call signaling (uses `trailing_byte=1`)
 
 ### Critical Protocol Rules
@@ -90,39 +99,31 @@ All communication is raw TCP on port **64100**. Every message has an 8-byte head
 
 ## Key Entities
 
-All entities use `_attr_has_entity_name = True` with device name `"Comelit Intercom"`, so entity IDs include the device prefix on fresh installs:
+All entities use `_attr_has_entity_name = True`. The device name is derived from `coordinator.device_name` (the config entry title), so entity IDs reflect the user-configured name set during setup (e.g. `"Front Door"` → `button.front_door_actuator`). Default is `"Comelit <host>"` when no name is set.
 
 | Entity | Description |
 |--------|-------------|
-| `button.comelit_intercom_<door_name>` | Press to open door/gate — linked to main intercom device |
-| `event.comelit_intercom_doorbell` | Fires `doorbell_ring` and `missed_call` events |
-| `camera.comelit_intercom_live_feed` | Live video stream from intercom |
-| `button.comelit_intercom_start_video_feed` | Manually trigger video call |
-| `button.comelit_intercom_stop_video_feed` | Stop active video call |
+| `button.<name>_<door_name>` | Press to open door/gate; stops video 10s after if active |
+| `event.<name>_doorbell` | Fires `doorbell_ring` and `missed_call` events |
+| `camera.<name>_live_feed` | Live video stream from intercom (`is_streaming` reflects session state) |
+| `button.<name>_start_video_feed` | Manually trigger video call |
+| `button.<name>_stop_video_feed` | Stop active video call |
 
 ### Entity ID Note
 
 Door `id` from device can be non-unique (e.g., both doors had id=0). The `index` field on the Door model is a sequential counter used for unique entity IDs.
 
-Entity IDs are persisted in HA's entity registry by `unique_id`. If upgrading from an older version with different IDs (e.g., `camera.intercom_video`), delete and re-add the integration or rename manually in Settings → Entities.
+Entity IDs are persisted in HA's entity registry by `unique_id`. If upgrading from an older version with different IDs, delete and re-add the integration or rename manually in Settings → Entities.
 
 ## Door Control
 
-Two code paths depending on whether a video session is active:
+Three code paths selected automatically by `coordinator.async_open_door`:
 
-**Without video** (`door.py` — 6-step sequence on shared client):
-1. Open `CTPP_DOOR` channel (wire name `CTPP`) with apt address
-2. Send `encode_ctpp_init` — read 2 responses (optional, device may not respond)
-3. Send `encode_open_door` + `encode_open_door_confirm` (Phase B)
-4. Send `encode_door_init` — read 2 responses (optional)
-5. Send `encode_open_door` + `encode_open_door_confirm` again (Phase D)
-6. Release channel
-
-**With video active** (`video_call.py` — single message on existing CTPP channel):
+**Path 1 — video active** (`video_call.py` — single message on existing CTPP channel):
 - PCAP-verified (`camera_feed_with_open_door_local.pcap`): the Android app sends a **single `0x1840/0x000D` message** on the video CTPP channel — no new channel, no 6-step sequence
 - `VideoCallSession.async_open_door_on_ctpp(our_addr, entrance_addr, relay_index)` — increments call counter under `_ctpp_lock`, sends `encode_door_open_during_video`
 - Device ACKs with `0x1800/0x0000`; relay activates immediately
-- `relay_index` = `door.output_index` (may need `+1` if device uses 1-indexed relays — verify on first test)
+- `relay_index` = `door.output_index`
 
 **Body structure of `encode_door_open_during_video` (48 bytes):**
 ```
@@ -131,16 +132,35 @@ Two code paths depending on whether a video session is active:
 [our_addr padded to 10 bytes] [entrance_addr padded to 10 bytes]
 ```
 
+**Path 2 — VIP listener active, no video** (`door.py` → `open_door_fast`):
+- Reuses the already-open CTPP channel; skips the init handshake entirely
+- Fires `encode_open_door` + `encode_open_door_confirm` twice (~30 ms total)
+- Used when notifications are enabled and no video is running
+
+**Path 3 — no CTPP channel open** (`door.py` → `open_door_standalone`):
+- Opens a transient `CTPP_DOOR` channel with full `ctpp_init_sequence`
+- 6-step sequence: init → read 2 responses → ACK pair → open+confirm × 2 → close channel
+- Used when notifications are disabled
+
+**`ctpp_init_sequence` (shared via `ctpp.py`):**
+1. Send `encode_ctpp_init` (apt_addr, apt_sub, timestamp)
+2. Drain up to 2 responses (optional, device may not reply)
+3. Send ACK pair: `encode_call_response_ack` with prefix `0x1800` then `0x1820`, timestamp `= init_ts + 0x01010000`
+
 ## Video Streaming
 
-- `video_call.py` handles TCP signaling: CTPP → call init → UDPM → codec → 2x RTPC → link → video config
-- `rtp_receiver.py` handles UDP reception: ICONA header → RTP → H.264 FU-A → PyAV decode → JPEG; NAL queue carries `(rtp_ts, nal_bytes)` tuples
-- `rtsp_server.py` serves H.264 + G.711 PCMA over local RTSP (TCP interleaved) for HA stream integration; monotonic timestamps rebased across calls
+- `video_call.py` handles TCP signaling on the **shared coordinator client**: reuses open CTPP when VIP listener is active (skips init), opens its own if not (`_owns_ctpp = True`)
+- `rtp_receiver.py` handles UDP reception: ICONA header → RTP → H.264 FU-A → PyAV decode → JPEG; NAL queue carries `(rtp_ts, nal_bytes)` tuples; logs IDR keyframe intervals for freeze diagnosis
+- `rtsp_server.py` serves H.264 over local RTSP (TCP interleaved); monotonic timestamps rebased across calls
 - Video config sends resolution 800×480 at 25 FPS
-- Auto-starts on `doorbell_ring` push event; manual start via "Start Video" button or Lovelace card play button
+- Video does **not** auto-start on doorbell ring — user controls via button, Lovelace card, or automation
+- VIP listener is paused (`stop_task()`) before video starts so the session can own the CTPP channel; restarted in `async_stop_video` via `_ensure_vip_listener()`
 - **Persistent RTSP server** owned by coordinator — started at HA setup, never stopped between calls; `stream_source()` always returns a valid URL
-- **`_video_ready_event`** (asyncio.Event) gates `stream_source()` — returns None until session is ready, preventing HA stream worker from probing an empty stream during CTPP negotiation
-- **`_video_start_lock`** (asyncio.Lock) in coordinator prevents concurrent `async_start_video` calls — second concurrent call is immediately rejected with RuntimeError
+- **`_video_ready_event`** (asyncio.Event) gates both `stream_source()` and the RTSP `PLAY` handler — clients stall inside PLAY during the CTPP handshake instead of erroring on an empty stream and triggering a 10s HA backoff
+- **`_video_start_lock`** (asyncio.Lock) in coordinator prevents concurrent `async_start_video` calls
+- **`disconnect_clients()`** on new session start — forces go2rtc to re-`DESCRIBE` against a stream with video already flowing (avoids 20+ s delay for go2rtc to detect a new video track on an existing connection)
+- **RTCP Sender Reports** — periodic (5s) SR packets with NTP/RTP timestamp pairs; fixes "no reference clock" delays in VLC, go2rtc and browsers
+- **`is_streaming` property** on camera entity — reflects active session state so HA frontend correctly shows "streaming" vs "idle" and go2rtc attaches via WebRTC on the first session
 - **Inline re-establishment** on CALL_END (~30s): ACK → refresh RTPC_LINK → VIDEO_CONFIG_RESP — no TCP reconnect, video is uninterrupted
 - Video falls back to TCP transport (RTPC2) if UDP is blocked by NAT/firewall
 
@@ -154,31 +174,45 @@ Two code paths depending on whether a video session is active:
 - Device responds by opening a new RTPC channel; audio flows ~3.5s later
 - **Audio codec: PCMA G.711 A-law, PT=8, 20ms frames (160 bytes/frame)**
 - Audio arrives on same UDP port as video, distinguished by RTP payload type (PT=8)
-- `rtsp_server.py` sends silent PCMA keepalive (0xD5) every ~1s when no audio queued — keeps go2rtc alive
+- Silent PCMA keepalive is **disabled** — it was ticking the 8 kHz audio clock ~50× too slowly, causing HLS/WebRTC stutters
 - **Hangup:** `encode_hangup` in `protocol.py`, action `0x2d` + entrance address
 - See `docs/audio_protocol_findings_2026_03_22.md` for protocol analysis
 - See `docs/implementation_state_2026_03_25.md` for full implementation notes
 
 ## Testing Device
 
-- IP: `192.168.1.111`, HTTP port: `8080`, ICONA port: `64100`
-- Credentials: `admin` / `comelit`
-- Config: apt_address=SB000006, apt_subaddress=1, 2 doors, 0 cameras
+- HTTP port: `8080`, ICONA port: `64100`
+- Credentials: `admin` / `comelit`, token in `.env` (COMELIT_TOKEN)
+- Config: apt_address=SB000006, apt_subaddress=1, 2 doors (Actuator, Entrance Lock), 0 cameras
 
-## Lovelace Card
+## Lovelace Cards
 
-A custom Lovelace card (`www/comelit-intercom-card.js`) is automatically registered on HA startup:
+Both cards are automatically registered on HA startup via `StaticPathConfig` (HA 2024.7+) and versioned Lovelace resource URLs.
 
-- **Static path** registered at `/comelit_intercom_local/comelit-intercom-card.js` (version-aware, uses `StaticPathConfig` for HA 2024.7+)
-- **Lovelace resource** auto-registered with versioned URL (`?v=<manifest version>`) — updates automatically on version bump
-- **Card config** (YAML):
+**Intercom camera card** (`www/comelit-intercom-card.js`):
+- Shows camera snapshot with play button overlay; click to start video
+- Live view uses `hui-picture-entity-card` (created via `window.loadCardHelpers()` to ensure element is upgraded before `setConfig`)
+- Stops video on navigation away (`location-changed` + `getBoundingClientRect()`) or DOM removal
+- Card config:
   ```yaml
   type: custom:comelit-intercom-card
   camera_entity: camera.comelit_intercom_live_feed
   start_entity: button.comelit_intercom_start_video_feed  # optional
   stop_entity: button.comelit_intercom_stop_video_feed
   ```
-- **UI behaviour**: shows camera snapshot with play button overlay; click to start video. Live view uses `hui-picture-entity-card` (created via `window.loadCardHelpers()` to ensure element is upgraded before `setConfig`). Stops video on navigation away (`location-changed` + `getBoundingClientRect()` visibility check) or DOM removal.
+
+**Doorbell notification card** (`www/comelit-doorbell-card.js`):
+- States: Idle (thumbnail + doorbell badge) → Ringing (pulsing icon + Answer/Dismiss) → Answered (live stream + stop button)
+- Auto-dismisses after `dismiss_after` seconds (default 30)
+- Card config:
+  ```yaml
+  type: custom:comelit-doorbell-card
+  doorbell_entity: event.comelit_intercom_doorbell
+  camera_entity: camera.comelit_intercom_live_feed
+  start_entity: button.comelit_intercom_start_video_feed
+  stop_entity: button.comelit_intercom_stop_video_feed
+  dismiss_after: 30  # optional
+  ```
 
 ## HA Debug Logging
 
@@ -243,10 +277,20 @@ The `get-configuration` response includes:
 - `vip`: apartment address (`apt-address`), sub-address, call-divert settings
 - `building-config`: building description
 
+### VIP Event Listener
+
+- The PUSH channel only registers an FCM token — actual call events (doorbell ring, door opened) arrive as binary messages on the persistent CTPP channel
+- `VipEventListener` opens `CTPP_VIP` + `CSPB_VIP` at startup, runs `ctpp_init_sequence`, and listens in a background task
+- The device sends a periodic registration renewal signal (`0x1860/0x0010`); the listener must ACK with `0x1800` + `0x1820` or the device stops sending events
+- Action codes: `0x18C0` (call init) and `0x1860/0x0001` (IN_ALERTING) → `doorbell_ring`; `0x1860/0x0003` → `door_opened`
+- Events are deduplicated within a 10s window to suppress device retransmissions
+- VIP listener is paused during video and restarted after `async_stop_video`
+
 ### Door Control
 
 - Door opening does **not** use JSON requests — it uses binary-only CTPP/CSPB channel commands
-- This is why a fresh TCP connection with the 6-step binary sequence is needed
+- Three paths: video active (single message on CTPP), VIP listener open (fast path, reuse CTPP), no CTPP (standalone with full init)
+- See Door Control section above for full details
 
 ### Cloud Architecture (not used by this component)
 

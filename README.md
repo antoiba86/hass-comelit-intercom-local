@@ -160,9 +160,11 @@ The ICONA Bridge protocol runs over raw TCP on port 64100. Every message has an 
 Key operations:
 - **Authentication**: Open UAUT channel → send JSON access request with token → expect code 200
 - **Configuration**: Open UCFG channel → request config → parse doors, cameras, addresses
-- **Door open (no video)**: Open CTPP channel → 6-step binary sequence (init → open+confirm → door init → open+confirm)
-- **Door open (during video)**: Single `0x1840/0x000D` message on the existing video CTPP channel — PCAP-verified from Android app local traffic capture
-- **Push notifications**: Open PUSH channel → receive unsolicited JSON on doorbell ring
+- **VIP events**: Persistent CTPP channel — binary messages for doorbell ring, door opened, renewal ACK; replaces FCM-based PUSH for reliable local event delivery
+- **Door open (video active)**: Single `0x1840/0x000D` message on the existing video CTPP channel — PCAP-verified from Android app local traffic capture
+- **Door open (VIP listener active, no video)**: Reuse open CTPP, fire open+confirm directly — no init overhead (~30 ms)
+- **Door open (notifications disabled)**: Open transient CTPP channel → full init → 6-step binary sequence → close
+- **Push channel**: Registers FCM token; also used as a 90s keepalive probe — device ACKs with JSON, preventing false reconnect cycles
 
 ## Changelog
 
@@ -179,9 +181,15 @@ Key operations:
 
 - **Custom integration name** — new optional "Name" field in the config flow sets the integration title and entity prefix; leave blank to use the host IP
 - **Options flow** — enable or disable doorbell notifications after setup via Settings → Integrations → Configure without removing and re-adding the integration
-- **Door open during active video** — pressing a door button while video is active now sends a single message on the existing CTPP channel (PCAP-verified Android app behaviour) instead of opening a second TCP connection; faster and more reliable
-- **Single shared TCP connection** — video signaling and VIP event listening now share the coordinator's TCP connection; eliminates connection conflicts when the device only accepts one client at a time
-- **Persistent RTSP stream** — `stream_source()` always returns the RTSP URL so go2rtc can register the stream at HA startup without waiting for an active call
+- **Reliable doorbell detection** — replaced the FCM-based PUSH mechanism with a persistent CTPP channel listener (VIP events); actual call events are now received as binary messages on the device's local TCP channel, not via cloud FCM
+- **Doorbell notification card** — new `comelit-doorbell-card` auto-registered on startup; shows ring alert with Answer/Dismiss buttons and transitions to live stream when answered
+- **Door open during active video** — pressing a door button while video is active sends a single message on the existing CTPP channel (PCAP-verified Android app behaviour); no second TCP connection
+- **Faster door open** — when notifications are enabled, the CTPP channel is already open so door open skips the init handshake entirely (~30 ms vs ~2 s)
+- **Single shared TCP connection** — video signaling, VIP event listening, and door control share the coordinator's TCP connection; eliminates conflicts when the device only accepts one client at a time
+- **Door auto-stop** — pressing a door button while video is active automatically stops the video session 10 s later
+- **Faster time-to-first-frame** — RTSP `PLAY` response is gated until video RTP is flowing, preventing HA's stream worker from erroring on an empty stream; RTCP Sender Reports eliminate "no reference clock" delays in go2rtc, VLC, and browsers
+- **Accurate camera state** — `is_streaming` property reflects the active session so the Lovelace card transitions correctly and go2rtc attaches via WebRTC on the first video session
+- **TCP keepalive probe** — push-info re-sent every 90 s keeps the connection alive during idle periods; prevents false reconnect cycles when the device is reachable but quiet
 
 ### 0.1.3
 - **Video renewal** — inline re-establishment on CALL_END (~30s) without TCP reconnect; video is uninterrupted
