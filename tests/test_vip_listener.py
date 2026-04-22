@@ -60,13 +60,16 @@ def _make_config(apt_address: str = "SB000006", apt_subaddress: int = 1) -> Devi
 
 
 def _make_listener(
-    callback=None, apt_address: str = "SB000006", apt_subaddress: int = 1
+    callback=None,
+    apt_address: str = "SB000006",
+    apt_subaddress: int = 1,
+    init_ts: int = 0x12000000,
 ) -> VipEventListener:
     client = MagicMock()
     client.send_binary = AsyncMock()
     config = _make_config(apt_address, apt_subaddress)
     cb = callback or MagicMock()
-    listener = VipEventListener(client, config, cb)
+    listener = VipEventListener(client, config, cb, init_ts=init_ts)
     # Attach a fake open channel so send_binary works
     listener._channel = MagicMock()
     listener._channel.response_queue = asyncio.Queue()
@@ -348,7 +351,7 @@ class TestProcessMessage:
         assert listener._client.send_binary.await_count == 2
 
     @pytest.mark.asyncio
-    async def test_door_opened_sends_ack_and_fires_event(self):
+    async def test_door_opened_fires_event_without_ack(self):
         cb = MagicMock()
         listener = _make_listener(cb)
 
@@ -361,8 +364,10 @@ class TestProcessMessage:
         # Event fired
         cb.assert_called_once()
         assert cb.call_args[0][0].event_type == "door_opened"
-        # ACK sent once
-        listener._client.send_binary.assert_awaited_once()
+        # No ACK is sent — door_opened does not require one; the device
+        # retransmits briefly and stops on its own, and any ACK we send
+        # for this event gets rejected.
+        listener._client.send_binary.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_call_init_fires_doorbell_ring(self):
@@ -387,13 +392,22 @@ class TestProcessMessage:
         assert cb.call_args[0][0].event_type == "doorbell_ring"
 
     @pytest.mark.asyncio
-    async def test_renewal_ack_uses_incremented_timestamp(self):
-        """Renewal ACK timestamp must be msg timestamp + 0x01000000."""
-        cb = MagicMock()
-        listener = _make_listener(cb)
+    async def test_renewal_ack_uses_init_ts_plus_ctr_incr(self):
+        """Renewal ACK timestamp must be init_ts + 0x01010000 — PCAP-verified.
 
-        ts = 0x12000000
-        data = _make_ctpp_msg(PREFIX_VIP_EVENT, ts, ACTION_REGISTRATION_RENEWAL, flags=0)
+        The client derives outgoing ACK timestamps from its OWN init_ts, not
+        from the device's renewal timestamp. Using the device ts causes the
+        device to reject the ACK and retransmit until it gives up.
+        """
+        cb = MagicMock()
+        init_ts = 0x12000000
+        listener = _make_listener(cb, init_ts=init_ts)
+
+        # Device renewal timestamp is completely different — listener must ignore it
+        device_ts = 0xE869C888
+        data = _make_ctpp_msg(
+            PREFIX_VIP_EVENT, device_ts, ACTION_REGISTRATION_RENEWAL, flags=0
+        )
 
         sent_payloads: list[bytes] = []
 
@@ -404,8 +418,7 @@ class TestProcessMessage:
         await listener._process_message(data)
 
         assert len(sent_payloads) == 2
-        # Verify expected ACK timestamp (ts + 0x01000000) is embedded LE32 at offset 2
-        expected_ts = (ts + 0x01000000) & 0xFFFFFFFF
+        expected_ts = (init_ts + 0x01010000) & 0xFFFFFFFF
         for payload in sent_payloads:
             actual_ts = struct.unpack_from("<I", payload, 2)[0]
             assert actual_ts == expected_ts

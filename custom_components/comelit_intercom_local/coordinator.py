@@ -69,6 +69,10 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
         self._rtsp_server: LocalRtspServer | None = None
         self._rtsp_url: str | None = None
         self._vip_listener: VipEventListener | None = None
+        # LE32 counter sent in the last CTPP init on the shared connection;
+        # VIP listener needs it to derive outgoing ACK timestamps
+        # (ack_ts = init_ts + 0x01010000, PCAP-verified).
+        self._ctpp_init_ts: int = 0
         self._keepalive_task: asyncio.Task | None = None
         # Use an insertion-ordered dict to track callbacks (value is always None).
         # This avoids ValueError on removal and preserves iteration order.
@@ -103,11 +107,14 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
 
     async def _open_ctpp_channels(
         self, client: IconaBridgeClient, config: DeviceConfig
-    ) -> None:
+    ) -> int:
         """Open CTPP + CSPB channels and run the full init handshake.
 
         Called at setup and reconnect when notifications are enabled. When
         notifications are disabled, CTPP is opened lazily by door/video.
+
+        Returns the init_ts used in the handshake so the VIP listener can
+        derive its outgoing ACK timestamps from the same value.
         """
         our_addr = f"{config.apt_address}{config.apt_subaddress}"
         ctpp = await client.open_channel(
@@ -120,10 +127,12 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
             config.apt_address, config.apt_subaddress, our_addr,
             ts,
         )
+        self._ctpp_init_ts = ts
         _LOGGER.info(
             "CTPP channels opened for VIP events (address=%s, ts=0x%08X)",
             our_addr, ts,
         )
+        return ts
 
     async def async_setup(self) -> None:
         """Connect, authenticate, fetch config, and register for push."""
@@ -144,8 +153,10 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
         # arrive as binary VIP messages on the CTPP channel.
         if self.config_entry.options.get(CONF_ENABLE_NOTIFICATIONS, True):
             try:
-                await self._open_ctpp_channels(client, self._config)
-                vip = VipEventListener(client, self._config, self._on_push_event)
+                init_ts = await self._open_ctpp_channels(client, self._config)
+                vip = VipEventListener(
+                    client, self._config, self._on_push_event, init_ts=init_ts,
+                )
                 await vip.start()
                 self._vip_listener = vip
             except Exception:
@@ -214,8 +225,10 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
 
         if self.config_entry.options.get(CONF_ENABLE_NOTIFICATIONS, True):
             try:
-                await self._open_ctpp_channels(client, self._config)
-                vip = VipEventListener(client, self._config, self._on_push_event)
+                init_ts = await self._open_ctpp_channels(client, self._config)
+                vip = VipEventListener(
+                    client, self._config, self._on_push_event, init_ts=init_ts,
+                )
                 await vip.start()
                 self._vip_listener = vip
             except Exception:
@@ -457,13 +470,21 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
                 # which the coordinator's health-check will pick up.
 
     async def _ensure_vip_listener(self) -> None:
-        """Start VIP listener if enabled and not already running."""
+        """Start VIP listener if enabled and not already running.
+
+        Reuses the init_ts stored from the most recent _open_ctpp_channels
+        call so the restarted listener's outgoing ACKs match the counter
+        state the device already has for this CTPP channel.
+        """
         if self._vip_listener or not self._config or not self._client:
             return
         if not self.config_entry.options.get(CONF_ENABLE_NOTIFICATIONS, True):
             return
         try:
-            vip = VipEventListener(self._client, self._config, self._on_push_event)
+            vip = VipEventListener(
+                self._client, self._config, self._on_push_event,
+                init_ts=self._ctpp_init_ts,
+            )
             await vip.start()
             self._vip_listener = vip
             _LOGGER.info("VIP event listener restarted")

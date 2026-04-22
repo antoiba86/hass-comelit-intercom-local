@@ -34,6 +34,7 @@ def _make_config() -> DeviceConfig:
 def _make_client(ctpp_channel=None) -> MagicMock:
     client = MagicMock()
     client.send_binary = AsyncMock()
+    client.read_response = AsyncMock(return_value=None)
     client.get_channel = MagicMock(return_value=ctpp_channel)
     client.open_channel = AsyncMock(return_value=MagicMock())
     client.remove_channel = MagicMock()
@@ -57,8 +58,8 @@ class TestOpenDoorFast:
             await open_door_fast(client, config, door)
 
     @pytest.mark.asyncio
-    async def test_sends_open_and_confirm_twice_for_normal_door(self):
-        """open_door_fast sends OPEN_DOOR + CONFIRM twice on the existing CTPP channel."""
+    async def test_sends_full_sequence_for_normal_door(self):
+        """open_door_fast runs OPEN+CONFIRM → door_init → OPEN+CONFIRM on the existing CTPP channel."""
         channel = MagicMock()
         client = _make_client(ctpp_channel=channel)
         config = _make_config()
@@ -66,8 +67,10 @@ class TestOpenDoorFast:
 
         await open_door_fast(client, config, door)
 
-        # 2 pairs of (OPEN_DOOR, CONFIRM) = 4 sends total
-        assert client.send_binary.await_count == 4
+        # OPEN + CONFIRM + door_init + OPEN + CONFIRM = 5 sends
+        assert client.send_binary.await_count == 5
+        # door_init is followed by draining 2 responses
+        assert client.read_response.await_count == 2
 
     @pytest.mark.asyncio
     async def test_uses_existing_ctpp_channel(self):
@@ -85,8 +88,8 @@ class TestOpenDoorFast:
             assert c.args[0] is channel
 
     @pytest.mark.asyncio
-    async def test_sends_actuator_commands_for_actuator_door(self):
-        """open_door_fast routes actuator doors through _send_actuator_open."""
+    async def test_sends_actuator_sequence_for_actuator_door(self):
+        """open_door_fast routes actuator doors through the actuator-specific sequence."""
         channel = MagicMock()
         client = _make_client(ctpp_channel=channel)
         config = _make_config()
@@ -94,8 +97,9 @@ class TestOpenDoorFast:
 
         await open_door_fast(client, config, door)
 
-        # Actuator sends 2 messages (open + confirm), not 4
-        assert client.send_binary.await_count == 2
+        # actuator_init + actuator_open + actuator_confirm = 3 sends
+        assert client.send_binary.await_count == 3
+        assert client.read_response.await_count == 2
 
     @pytest.mark.asyncio
     async def test_wraps_exception_in_door_open_error(self):
@@ -161,8 +165,8 @@ class TestOpenDoorStandalone:
         mock_init.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_sends_open_commands_after_init(self):
-        """After init, open_door_standalone sends OPEN_DOOR + CONFIRM twice."""
+    async def test_sends_full_sequence_after_init(self):
+        """After top-level init, OPEN+CONFIRM → door_init → OPEN+CONFIRM = 5 sends."""
         client = _make_client()
         config = _make_config()
         door = _make_door()
@@ -170,11 +174,12 @@ class TestOpenDoorStandalone:
         with patch("custom_components.comelit_intercom_local.door.ctpp_init_sequence", new_callable=AsyncMock):
             await open_door_standalone(client, config, door)
 
-        assert client.send_binary.await_count == 4
+        assert client.send_binary.await_count == 5
+        assert client.read_response.await_count == 2
 
     @pytest.mark.asyncio
-    async def test_actuator_sends_two_commands(self):
-        """Actuator door sends only 2 commands (open + confirm), not 4."""
+    async def test_actuator_sends_three_commands(self):
+        """Actuator: actuator_init + actuator_open + actuator_confirm = 3 sends."""
         client = _make_client()
         config = _make_config()
         door = _make_door(is_actuator=True)
@@ -182,7 +187,8 @@ class TestOpenDoorStandalone:
         with patch("custom_components.comelit_intercom_local.door.ctpp_init_sequence", new_callable=AsyncMock):
             await open_door_standalone(client, config, door)
 
-        assert client.send_binary.await_count == 2
+        assert client.send_binary.await_count == 3
+        assert client.read_response.await_count == 2
 
     @pytest.mark.asyncio
     async def test_wraps_exception_in_door_open_error(self):

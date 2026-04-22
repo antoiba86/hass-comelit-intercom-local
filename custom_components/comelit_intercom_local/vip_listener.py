@@ -26,6 +26,7 @@ import struct
 import time
 
 from .client import IconaBridgeClient
+from .ctpp import _CTR_INCR_BOTH
 from .models import DeviceConfig, PushEvent
 from .protocol import encode_call_response_ack
 
@@ -104,16 +105,29 @@ class VipEventListener:
         client: IconaBridgeClient,
         config: DeviceConfig,
         callback: Callable[[PushEvent], None],
+        init_ts: int,
     ) -> None:
         self._client = client
         self._config = config
         self._callback = callback
+        # init_ts is the LE32 counter the coordinator sent in encode_ctpp_init.
+        # All outgoing ACKs on this channel must use `init_ts + 0x01010000`
+        # (PCAP-verified: client never derives ACK ts from the device's
+        # renewal ts — using device_ts causes the device to reject the ACK).
+        self._init_ts = init_ts
+        self._ack_ts = (init_ts + _CTR_INCR_BOTH) & 0xFFFFFFFF
         self._task: asyncio.Task | None = None
         self._running = False
         # Timestamp of the last fired event per type — used to deduplicate
         # repeated transmissions (device retransmits call init every ~1-2s).
         self._last_fired: dict[str, float] = {}
         self._dedup_window: float = 10.0  # seconds
+        # Tracks the last device timestamp seen per (prefix, action) pair so
+        # we can detect retransmits: if the device resends the same message
+        # with an identical timestamp within _retransmit_window seconds, our
+        # previous ACK was not accepted.
+        self._last_seen_ts: dict[tuple[int, int], tuple[int, float]] = {}
+        self._retransmit_window: float = 10.0  # seconds
 
     async def start(self) -> None:
         """Attach to the existing CTPP channel and start the listener task.
@@ -178,7 +192,20 @@ class VipEventListener:
 
         prefix = msg["prefix"]
         action = msg["action"]
+        ts = msg["timestamp"]
         addresses = msg["addresses"]
+
+        # Detect retransmits: device resending the same (prefix, action, ts)
+        # means our previous ACK was not accepted.
+        now = time.time()
+        key = (prefix, action)
+        last = self._last_seen_ts.get(key)
+        is_retransmit = (
+            last is not None
+            and last[0] == ts
+            and (now - last[1]) < self._retransmit_window
+        )
+        self._last_seen_ts[key] = (ts, now)
 
         # Log at INFO only for events that represent real VIP activity:
         # 0x18C0 (call init / doorbell), 0x1860 with a meaningful action.
@@ -187,21 +214,23 @@ class VipEventListener:
         _is_real_vip = prefix == PREFIX_CALL_INIT or (
             prefix == PREFIX_VIP_EVENT and action not in (0x0000, ACTION_CALL_TERMINATED)
         )
-        if _is_real_vip:
+        if is_retransmit:
+            _LOGGER.warning(
+                "VIP RETRANSMIT: prefix=0x%04X action=0x%04X ts=0x%08X "
+                "— our previous ACK was not accepted by device (addrs=%s)",
+                prefix, action, ts, addresses,
+            )
+        elif _is_real_vip:
             _LOGGER.info(
-                "VIP event: prefix=0x%04X action=0x%04X flags=0x%04X addrs=%s (%d bytes)",
-                prefix,
-                action,
+                "VIP event: prefix=0x%04X action=0x%04X ts=0x%08X flags=0x%04X addrs=%s (%d bytes)",
+                prefix, action, ts,
                 msg.get("flags", 0),
-                addresses,
-                len(data),
+                addresses, len(data),
             )
         else:
             _LOGGER.debug(
-                "VIP tail/keepalive: prefix=0x%04X action=0x%04X (%d bytes)",
-                prefix,
-                action,
-                len(data),
+                "VIP tail/keepalive: prefix=0x%04X action=0x%04X ts=0x%08X (%d bytes)",
+                prefix, action, ts, len(data),
             )
 
         if _LOGGER.isEnabledFor(logging.DEBUG):
@@ -220,11 +249,14 @@ class VipEventListener:
         if prefix == PREFIX_CALL_INIT:
             await self._send_event_ack(msg)
 
-        # ACK all call-phase (0x1840) and VIP FSM (0x1860) events.
-        # Device retransmits unacknowledged events with exponential backoff.
-        # Renewal (0x1860/0x0010) is handled above and returns early, so it
-        # won't reach this check.
-        if prefix in (PREFIX_EVENT, PREFIX_VIP_EVENT):
+        # ACK all call-phase (0x1840) and VIP FSM (0x1860) events, EXCEPT
+        # door_opened (0x1860/0x0003) which does not require an ACK — the
+        # device retransmits briefly then stops on its own, and any ACK we
+        # send for it gets rejected anyway (wrong format / counter state).
+        # Renewal (0x1860/0x0010) is handled above and returns early.
+        if prefix in (PREFIX_EVENT, PREFIX_VIP_EVENT) and not (
+            prefix == PREFIX_VIP_EVENT and action == ACTION_DOOR_OPENED
+        ):
             await self._send_event_ack(msg)
 
         # Detect incoming call / doorbell ring.
@@ -252,18 +284,22 @@ class VipEventListener:
         Used for events like door_opened (0x1860/0x0003) where the device
         expects acknowledgment to clear the channel state. Without it the
         device stays "busy" for a few seconds, blocking subsequent rings.
+
+        Timestamp is `init_ts + 0x01010000` — see __init__ docstring.
         """
         apt_addr = self._config.apt_address
         apt_sub = self._config.apt_subaddress
         vip_address = f"{apt_addr}{apt_sub}"
         entrance_addr = msg["addresses"][0] if msg["addresses"] else apt_addr
-        ack_ts = (msg["timestamp"] + 0x01000000) & 0xFFFFFFFF
         try:
             await self._client.send_binary(
                 self._channel,
-                encode_call_response_ack(vip_address, entrance_addr, ack_ts),
+                encode_call_response_ack(vip_address, entrance_addr, self._ack_ts),
             )
-            _LOGGER.debug("VIP: sent event ACK (action=0x%04X, ts=0x%08X)", msg["action"], ack_ts)
+            _LOGGER.debug(
+                "VIP: sent event ACK (action=0x%04X, ts=0x%08X)",
+                msg["action"], self._ack_ts,
+            )
         except Exception:
             _LOGGER.warning("VIP: failed to send event ACK", exc_info=True)
 
@@ -272,21 +308,25 @@ class VipEventListener:
 
         The device sends this message periodically to verify the client is still
         listening. Without the ACK pair response it stops pushing VIP events.
+
+        Timestamp is `init_ts + 0x01010000` — see __init__ docstring.
         """
         apt_addr = self._config.apt_address
         apt_sub = self._config.apt_subaddress
         vip_address = f"{apt_addr}{apt_sub}"
-        ack_ts = (msg["timestamp"] + 0x01000000) & 0xFFFFFFFF
         try:
             await self._client.send_binary(
                 self._channel,
-                encode_call_response_ack(vip_address, apt_addr, ack_ts),
+                encode_call_response_ack(vip_address, apt_addr, self._ack_ts),
             )
             await self._client.send_binary(
                 self._channel,
-                encode_call_response_ack(vip_address, apt_addr, ack_ts, prefix=0x1820),
+                encode_call_response_ack(vip_address, apt_addr, self._ack_ts, prefix=0x1820),
             )
-            _LOGGER.debug("VIP: sent renewal ACK pair (ts=0x%08X)", ack_ts)
+            _LOGGER.info(
+                "VIP: sent renewal ACK pair (device_ts=0x%08X ack_ts=0x%08X)",
+                msg["timestamp"], self._ack_ts,
+            )
         except Exception:
             _LOGGER.warning("VIP: failed to send renewal ACK", exc_info=True)
 

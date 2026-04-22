@@ -36,6 +36,9 @@ async def ctpp_init_sequence(
     (when notifications are enabled) or per standalone door open (when they
     are not). All CTPP consumers share this single implementation.
 
+    The ACK pair timestamp is `init_ts + _CTR_INCR_BOTH` (= init_ts +
+    0x01010000).
+
     Args:
         client: the shared ICONA Bridge client.
         channel: the already-open CTPP channel.
@@ -48,13 +51,17 @@ async def ctpp_init_sequence(
     await client.send_binary(channel, encode_ctpp_init(apt_addr, apt_sub, timestamp))
     _LOGGER.debug("CTPP init sent (ts=0x%08X)", timestamp)
 
+    # Drain device's two responses (0x1800 ACK + 0x1860/0x0010 renewal request).
+    # We don't use the device's timestamp to compute our ACK — see docstring.
     for i in range(2):
         resp = await client.read_response(channel, timeout=response_timeout)
-        if resp and len(resp) >= 2:
-            msg_type = struct.unpack_from("<H", resp, 0)[0]
+        if resp and len(resp) >= 8:
+            prefix = struct.unpack_from("<H", resp, 0)[0]
+            resp_ts = struct.unpack_from("<I", resp, 2)[0]
+            action = struct.unpack_from(">H", resp, 6)[0]
             _LOGGER.debug(
-                "CTPP init response %d: %d bytes, type=0x%04X",
-                i + 1, len(resp), msg_type,
+                "CTPP init response %d: %d bytes, prefix=0x%04X ts=0x%08X action=0x%04X",
+                i + 1, len(resp), prefix, resp_ts, action,
             )
         else:
             _LOGGER.debug("CTPP init response %d: no response (timeout)", i + 1)
@@ -66,4 +73,6 @@ async def ctpp_init_sequence(
     await client.send_binary(
         channel, encode_call_response_ack(our_addr, apt_addr, ack_ts, prefix=0x1820)
     )
-    _LOGGER.debug("CTPP ACK pair sent (ack_ts=0x%08X)", ack_ts)
+    _LOGGER.debug(
+        "CTPP ACK pair sent (init_ts=0x%08X ack_ts=0x%08X)", timestamp, ack_ts,
+    )
