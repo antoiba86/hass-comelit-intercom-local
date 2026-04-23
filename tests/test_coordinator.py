@@ -350,34 +350,18 @@ class TestAsyncOpenDoor:
         session.async_open_door_on_ctpp.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_uses_fast_path_when_ctpp_open(self):
-        """async_open_door uses open_door_fast when CTPP is open but no video session."""
+    async def test_uses_open_door_when_no_video_session(self):
+        """async_open_door delegates to open_door when no video session is active."""
         coord = _make_coordinator(with_client=True)
-        coord._client.get_channel = MagicMock(return_value=MagicMock())
         door = MagicMock()
 
         with patch(
-            "custom_components.comelit_intercom_local.coordinator.open_door_fast",
+            "custom_components.comelit_intercom_local.coordinator.open_door",
             new_callable=AsyncMock,
-        ) as mock_fast:
+        ) as mock_open_door:
             await coord.async_open_door(door)
 
-        mock_fast.assert_awaited_once()
-
-    @pytest.mark.asyncio
-    async def test_uses_standalone_path_when_no_ctpp(self):
-        """async_open_door uses open_door_standalone when no CTPP channel is open."""
-        coord = _make_coordinator(with_client=True)
-        coord._client.get_channel = MagicMock(return_value=None)
-        door = MagicMock()
-
-        with patch(
-            "custom_components.comelit_intercom_local.coordinator.open_door_standalone",
-            new_callable=AsyncMock,
-        ) as mock_standalone:
-            await coord.async_open_door(door)
-
-        mock_standalone.assert_awaited_once()
+        mock_open_door.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_raises_when_not_connected(self):

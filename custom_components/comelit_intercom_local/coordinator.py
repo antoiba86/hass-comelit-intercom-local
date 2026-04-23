@@ -20,7 +20,7 @@ from .client import IconaBridgeClient
 from .config_reader import get_device_config
 from .const import CONF_ENABLE_NOTIFICATIONS, DOMAIN
 from .ctpp import ctpp_init_sequence
-from .door import open_door_fast, open_door_standalone
+from .door import open_door
 from .models import DeviceConfig, Door, PushEvent
 from .push import register_push, send_push_keepalive
 from .rtsp_server import LocalRtspServer
@@ -323,10 +323,8 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
             await self._video_session.async_open_door_on_ctpp(
                 our_addr, entrance_addr, door.output_index
             )
-        elif self._client.get_channel("CTPP") is not None:
-            await open_door_fast(self._client, self._config, door)
         else:
-            await open_door_standalone(self._client, self._config, door)
+            await open_door(self._client, self._config, door)
 
     async def async_start_video(
         self, auto_timeout: bool = True
@@ -492,35 +490,45 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
             _LOGGER.warning("Failed to restart VIP listener", exc_info=True)
 
     async def async_stop_video(self) -> None:
-        """Stop the active video call session."""
-        if self._video_session:
-            # Tear HA's Stream worker down gracefully FIRST, before any
-            # forced RTSP client disconnect.  Stream.stop() joins the
-            # worker thread, so its container closes cleanly; without
-            # this, disconnect_clients() triggers an EOF mid-read and
-            # HA logs "Stream ended; no additional packets" plus a 10 s
-            # backoff before the next Start can recover.
-            for cb in list(self._on_stop_video):
-                try:
-                    await cb()
-                except Exception:
-                    _LOGGER.exception("Error in stop-video callback")
+        """Stop the active video call session.
 
-            await self._video_session.stop(reason="user stopped")
-            self._video_session = None
-            self._video_ready_event.clear()
-            # Block future PLAYs until the next session is ready, and
-            # kick any remaining RTSP clients (e.g. go2rtc) so they
-            # reconnect fresh against a stream that already has video.
-            if self._rtsp_server:
-                self._rtsp_server.mark_not_ready()
-                self._rtsp_server.disconnect_clients()
-            # Restart VIP listener now that video released the CTPP slot.
-            # Skip if we're inside async_start_video (lock already held) —
-            # start_video will stop VIP again immediately anyway.
-            if not self._video_start_lock.locked():
-                await self._ensure_vip_listener()
-            await self._notify_video_state_change()
+        Snapshots _video_session and clears it immediately so a concurrent
+        async_stop_video call can't also try to stop the same session
+        (previous behaviour raced and crashed with AttributeError when the
+        first stop cleared the attribute while the second was awaiting a
+        stop-callback).
+        """
+        session = self._video_session
+        if session is None:
+            return
+        self._video_session = None
+        self._video_ready_event.clear()
+
+        # Tear HA's Stream worker down gracefully FIRST, before any
+        # forced RTSP client disconnect.  Stream.stop() joins the
+        # worker thread, so its container closes cleanly; without
+        # this, disconnect_clients() triggers an EOF mid-read and
+        # HA logs "Stream ended; no additional packets" plus a 10 s
+        # backoff before the next Start can recover.
+        for cb in list(self._on_stop_video):
+            try:
+                await cb()
+            except Exception:
+                _LOGGER.exception("Error in stop-video callback")
+
+        await session.stop(reason="user stopped")
+        # Block future PLAYs until the next session is ready, and
+        # kick any remaining RTSP clients (e.g. go2rtc) so they
+        # reconnect fresh against a stream that already has video.
+        if self._rtsp_server:
+            self._rtsp_server.mark_not_ready()
+            self._rtsp_server.disconnect_clients()
+        # Restart VIP listener now that video released the CTPP slot.
+        # Skip if we're inside async_start_video (lock already held) —
+        # start_video will stop VIP again immediately anyway.
+        if not self._video_start_lock.locked():
+            await self._ensure_vip_listener()
+        await self._notify_video_state_change()
 
     @property
     def video_session(self) -> VideoCallSession | None:

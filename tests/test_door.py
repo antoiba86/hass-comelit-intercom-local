@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from custom_components.comelit_intercom_local.door import open_door_fast, open_door_standalone
+from custom_components.comelit_intercom_local.door import open_door
 from custom_components.comelit_intercom_local.exceptions import DoorOpenError
 from custom_components.comelit_intercom_local.models import DeviceConfig, Door
 
@@ -42,20 +42,23 @@ def _make_client(ctpp_channel=None) -> MagicMock:
 
 
 # ---------------------------------------------------------------------------
-# open_door_fast
+# open_door — fast path (existing CTPP channel)
 # ---------------------------------------------------------------------------
 
 
-class TestOpenDoorFast:
+class TestOpenDoorFastPath:
     @pytest.mark.asyncio
-    async def test_raises_when_ctpp_not_open(self):
-        """open_door_fast raises DoorOpenError when no CTPP channel is available."""
+    async def test_opens_transient_channel_when_ctpp_not_open(self):
+        """open_door opens a transient CTPP_DOOR channel when no CTPP channel is available."""
         client = _make_client(ctpp_channel=None)
         config = _make_config()
         door = _make_door()
 
-        with pytest.raises(DoorOpenError, match="CTPP channel not open"):
-            await open_door_fast(client, config, door)
+        with patch("custom_components.comelit_intercom_local.door.ctpp_init_sequence", new_callable=AsyncMock):
+            await open_door(client, config, door)
+
+        open_calls = [c.args[0] for c in client.open_channel.call_args_list]
+        assert "CTPP_DOOR" in open_calls
 
     @pytest.mark.asyncio
     async def test_sends_full_sequence_for_normal_door(self):
@@ -65,7 +68,7 @@ class TestOpenDoorFast:
         config = _make_config()
         door = _make_door()
 
-        await open_door_fast(client, config, door)
+        await open_door(client, config, door)
 
         # OPEN + CONFIRM + door_init + OPEN + CONFIRM = 5 sends
         assert client.send_binary.await_count == 5
@@ -80,7 +83,7 @@ class TestOpenDoorFast:
         config = _make_config()
         door = _make_door()
 
-        await open_door_fast(client, config, door)
+        await open_door(client, config, door)
 
         client.get_channel.assert_called_with("CTPP")
         # All sends must use the same channel object
@@ -95,7 +98,7 @@ class TestOpenDoorFast:
         config = _make_config()
         door = _make_door(is_actuator=True)
 
-        await open_door_fast(client, config, door)
+        await open_door(client, config, door)
 
         # actuator_init + actuator_open + actuator_confirm = 3 sends
         assert client.send_binary.await_count == 3
@@ -111,15 +114,15 @@ class TestOpenDoorFast:
         door = _make_door()
 
         with pytest.raises(DoorOpenError, match="Failed to open door"):
-            await open_door_fast(client, config, door)
+            await open_door(client, config, door)
 
 
 # ---------------------------------------------------------------------------
-# open_door_standalone
+# open_door — standalone path (no CTPP channel open)
 # ---------------------------------------------------------------------------
 
 
-class TestOpenDoorStandalone:
+class TestOpenDoorStandalonePath:
     @pytest.mark.asyncio
     async def test_opens_ctpp_door_channel(self):
         """open_door_standalone opens a transient CTPP_DOOR channel."""
@@ -128,14 +131,14 @@ class TestOpenDoorStandalone:
         door = _make_door()
 
         with patch("custom_components.comelit_intercom_local.door.ctpp_init_sequence", new_callable=AsyncMock):
-            await open_door_standalone(client, config, door)
+            await open_door(client, config, door)
 
         open_calls = [c.args[0] for c in client.open_channel.call_args_list]
         assert "CTPP_DOOR" in open_calls
 
     @pytest.mark.asyncio
-    async def test_removes_channels_in_finally(self):
-        """CTPP_DOOR and CSPB_DOOR are always removed, even on failure."""
+    async def test_removes_ctpp_door_in_finally(self):
+        """CTPP_DOOR is always removed, even on failure."""
         client = _make_client()
         client.send_binary = AsyncMock(side_effect=OSError("bang"))
         config = _make_config()
@@ -143,11 +146,10 @@ class TestOpenDoorStandalone:
 
         with patch("custom_components.comelit_intercom_local.door.ctpp_init_sequence", new_callable=AsyncMock):
             with pytest.raises(DoorOpenError):
-                await open_door_standalone(client, config, door)
+                await open_door(client, config, door)
 
         removed = {c.args[0] for c in client.remove_channel.call_args_list}
         assert "CTPP_DOOR" in removed
-        assert "CSPB_DOOR" in removed
 
     @pytest.mark.asyncio
     async def test_calls_ctpp_init_sequence(self):
@@ -160,7 +162,7 @@ class TestOpenDoorStandalone:
             "custom_components.comelit_intercom_local.door.ctpp_init_sequence",
             new_callable=AsyncMock,
         ) as mock_init:
-            await open_door_standalone(client, config, door)
+            await open_door(client, config, door)
 
         mock_init.assert_awaited_once()
 
@@ -172,7 +174,7 @@ class TestOpenDoorStandalone:
         door = _make_door()
 
         with patch("custom_components.comelit_intercom_local.door.ctpp_init_sequence", new_callable=AsyncMock):
-            await open_door_standalone(client, config, door)
+            await open_door(client, config, door)
 
         assert client.send_binary.await_count == 5
         assert client.read_response.await_count == 2
@@ -185,7 +187,7 @@ class TestOpenDoorStandalone:
         door = _make_door(is_actuator=True)
 
         with patch("custom_components.comelit_intercom_local.door.ctpp_init_sequence", new_callable=AsyncMock):
-            await open_door_standalone(client, config, door)
+            await open_door(client, config, door)
 
         assert client.send_binary.await_count == 3
         assert client.read_response.await_count == 2
@@ -199,4 +201,4 @@ class TestOpenDoorStandalone:
         door = _make_door()
 
         with pytest.raises(DoorOpenError, match="Failed to open door"):
-            await open_door_standalone(client, config, door)
+            await open_door(client, config, door)

@@ -120,3 +120,32 @@ class TestCtppInitSequence:
         for ack in sent[-2:]:
             actual_ts = struct.unpack_from("<I", ack, 2)[0]
             assert actual_ts == expected_ts
+
+    @pytest.mark.asyncio
+    async def test_send_ack_false_omits_ack_pair(self):
+        """send_ack=False must send only the init message — no ACK pair."""
+        client = _make_client([None, None])
+        channel = MagicMock()
+
+        sent: list[bytes] = []
+        client.send_binary = AsyncMock(side_effect=lambda ch, data: sent.append(data))
+
+        await ctpp_init_sequence(
+            client, channel, "SB000006", 1, "SB0000061", 0x10000000,
+            send_ack=False,
+        )
+
+        assert len(sent) == 1
+
+    @pytest.mark.asyncio
+    async def test_send_ack_false_still_reads_responses(self):
+        """send_ack=False must still drain the two device responses."""
+        client = _make_client([None, None])
+        channel = MagicMock()
+
+        await ctpp_init_sequence(
+            client, channel, "SB000006", 1, "SB0000061", 0x10000000,
+            send_ack=False,
+        )
+
+        assert client.read_response.await_count == 2
