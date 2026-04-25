@@ -22,7 +22,7 @@ from custom_components.comelit_intercom_local.vip_listener import (
     PREFIX_ACK,
     PREFIX_CALL_INIT,
     PREFIX_CONFIRM,
-    PREFIX_EVENT,
+    PREFIX_VIDEO_EVENT,
     PREFIX_VIP_EVENT,
     VipEventListener,
     parse_ctpp_message,
@@ -309,7 +309,7 @@ class TestHandleVipEvent:
         cb = MagicMock()
         listener = _make_listener(cb)
 
-        listener._handle_vip_event(self._msg(PREFIX_EVENT, 0x0001))
+        listener._handle_vip_event(self._msg(PREFIX_VIDEO_EVENT, 0x0001))
 
         cb.assert_not_called()
 

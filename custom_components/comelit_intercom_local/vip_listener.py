@@ -35,7 +35,7 @@ _LOGGER = logging.getLogger(__name__)
 # CTPP prefixes sent by the device
 PREFIX_ACK = 0x1800
 PREFIX_CONFIRM = 0x1820
-PREFIX_EVENT = 0x1840
+PREFIX_VIDEO_EVENT = 0x1840
 PREFIX_VIP_EVENT = 0x1860
 PREFIX_CALL_INIT = 0x18C0
 
@@ -216,7 +216,7 @@ class VipEventListener:
         )
         # 0x1840 retransmits after video stops are expected — we don't ACK them
         # (no valid counter) so the device retransmits briefly then stops on its own.
-        _is_video_tail = prefix == PREFIX_EVENT
+        _is_video_tail = prefix == PREFIX_VIDEO_EVENT
         if is_retransmit:
             if _is_video_tail:
                 _LOGGER.debug(
@@ -264,7 +264,7 @@ class VipEventListener:
         # device retransmits briefly then stops on its own, and any ACK we
         # send for it gets rejected anyway (wrong format / counter state).
         # Renewal (0x1860/0x0010) is handled above and returns early.
-        if prefix in (PREFIX_EVENT, PREFIX_VIP_EVENT) and not (
+        if prefix in (PREFIX_VIDEO_EVENT, PREFIX_VIP_EVENT) and not (
             prefix == PREFIX_VIP_EVENT and action == ACTION_DOOR_OPENED
         ):
             await self._send_event_ack(msg)
@@ -285,7 +285,7 @@ class VipEventListener:
         #
         # The 0x1800 prefix (ACK) is NOT an event — it's a response to our
         # messages, so we skip it.
-        if prefix in (PREFIX_CALL_INIT, PREFIX_VIP_EVENT, PREFIX_EVENT):
+        if prefix in (PREFIX_CALL_INIT, PREFIX_VIP_EVENT, PREFIX_VIDEO_EVENT):
             self._handle_vip_event(msg)
 
     async def _send_event_ack(self, msg: dict) -> None:
