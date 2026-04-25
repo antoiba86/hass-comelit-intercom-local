@@ -70,7 +70,7 @@ class TestRequestVideoStop:
 
     @pytest.mark.asyncio
     async def test_async_start_video_resets_flag(self):
-        """async_start_video must clear the stopped-by-user flag."""
+        """async_start_video(by_user=True) must clear the stopped-by-user flag."""
         coord = _make_coordinator(with_client=True)
         coord._video_stopped_by_user = True
 
@@ -81,7 +81,7 @@ class TestRequestVideoStop:
             "custom_components.comelit_intercom_local.coordinator.VideoCallSession",
             return_value=mock_session,
         ):
-            await coord.async_start_video(auto_timeout=True)
+            await coord.async_start_video(auto_timeout=True, by_user=True)
 
         assert coord.video_stopped_by_user is False
 
@@ -191,7 +191,7 @@ class TestAsyncStartVideo:
 
     @pytest.mark.asyncio
     async def test_start_video_resets_stopped_flag(self):
-        """async_start_video clears _video_stopped_by_user before starting."""
+        """async_start_video(by_user=True) clears _video_stopped_by_user before starting."""
         coord = _make_coordinator(with_client=True)
         coord._video_stopped_by_user = True
         mock_session = MagicMock()
@@ -201,7 +201,7 @@ class TestAsyncStartVideo:
             "custom_components.comelit_intercom_local.coordinator.VideoCallSession",
             return_value=mock_session,
         ):
-            await coord.async_start_video()
+            await coord.async_start_video(by_user=True)
 
         assert coord._video_stopped_by_user is False
 

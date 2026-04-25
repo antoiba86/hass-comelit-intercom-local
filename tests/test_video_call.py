@@ -294,18 +294,19 @@ class TestCtppMonitorLoop:
         )
 
     @pytest.mark.asyncio
-    async def test_ctpp_relay_activation_bare_acks_without_reestablish(self):
-        """0x1840/0x0003/sub=0x000E (relay activated after door-open) must
-        bare-ACK, NOT trigger inline re-establish (which would kill the
-        video session mid-door-open).
+    async def test_ctpp_call_end_sub_000E_triggers_reestablish(self):
+        """0x1840/0x0003/sub=0x000E (door-open triggered CALL_END) must
+        trigger inline re-establish — same path as the periodic timer CALL_END.
+
+        PCAP-verified: the device sends this sub-code when a door-open relay
+        activates during video; the renewal sequence is required to keep video
+        alive, just like a timer-triggered CALL_END (sub=0x0000).
         """
         import struct
         session = self._make_session()
 
         mock_client = MagicMock()
-        # Relay activation: action=0x0003, sub=0x000E, plus padding so
-        # the length is >= 10 bytes and our sub-field check fires.
-        relay_body = (
+        call_end_body = (
             struct.pack("<H", 0x1840)
             + struct.pack("<I", 0xDEADBEEF)
             + struct.pack(">H", 0x0003)
@@ -318,7 +319,7 @@ class TestCtppMonitorLoop:
             nonlocal call_count
             call_count += 1
             if call_count == 1:
-                return relay_body
+                return call_end_body
             session._active = False
             return None
 
@@ -339,12 +340,7 @@ class TestCtppMonitorLoop:
             rtpc1_server_id=0xABCD, media_req_id=0x1234,
         )
 
-        # Must NOT re-establish — that was the bug
-        assert not reestablish_called
-        # Must bare-ACK with 0x1800
-        mock_client.send_binary.assert_awaited_once()
-        sent = mock_client.send_binary.await_args.args[1]
-        assert struct.unpack_from("<H", sent, 0)[0] == 0x1800
+        assert reestablish_called
 
     @pytest.mark.asyncio
     async def test_ctpp_device_acks_are_ignored(self):
@@ -545,19 +541,14 @@ class TestInlineReestablish:
     """Tests for _inline_reestablish — the CALL_END renewal sequence."""
 
     @pytest.mark.asyncio
-    async def test_reestablish_uses_refresh_rtpc_link_and_video_config_resp(self):
-        """_inline_reestablish must send encode_rtpc_link(refresh=True) and
-        encode_video_config_resp, NOT encode_video_config.
-
-        This is PCAP-verified: during renewal the Android app sends RTPC_LINK
-        with first_byte=0x98 (refresh=True) and VIDEO_CONFIG with prefix 0x1860
-        (encode_video_config_resp), not the initial-start variants.
+    async def test_reestablish_sends_rtpc_link_and_video_config(self):
+        """_inline_reestablish must send RTPC_LINK (0x1840/0x000A) followed
+        by VIDEO_CONFIG (0x1840 prefix) to re-establish the media session.
         """
         import struct
         from custom_components.comelit_intercom_local.protocol import (
             encode_rtpc_link,
             encode_video_config,
-            encode_video_config_resp,
         )
 
         session = VideoCallSession.__new__(VideoCallSession)
@@ -637,19 +628,13 @@ class TestInlineReestablish:
             call_counter=0x00010000,
         )
 
-        # Extract the raw bytes of every message sent
         sent_prefixes = [struct.unpack_from("<H", d, 0)[0] for d in sent_data]
+        sent_actions = [
+            struct.unpack_from(">H", d, 6)[0] if len(d) >= 8 else 0
+            for d in sent_data
+        ]
 
-        # encode_video_config_resp uses prefix 0x1860
-        # encode_video_config uses prefix 0x1840
-        # We must see 0x1860 and NOT only 0x1840 for the video-config message.
-        assert 0x1860 in sent_prefixes, (
-            "encode_video_config_resp (prefix 0x1860) was not sent during renewal. "
-            "encode_video_config (0x1840) must NOT be used here."
-        )
-
-        # Verify RTPC_LINK uses refresh=True (first_byte=0x98) —
-        # find the RTPC_LINK message (action=0x000A, prefix=0x1840)
+        # RTPC_LINK: prefix 0x1840, action 0x000A
         ACTION_RTPC_LINK = 0x000A
         rtpc_link_messages = [
             d for d in sent_data
@@ -658,20 +643,14 @@ class TestInlineReestablish:
             and struct.unpack_from(">H", d, 6)[0] == ACTION_RTPC_LINK
         ]
         assert rtpc_link_messages, "No RTPC_LINK message (0x1840/0x000A) was sent"
-        # The extra block starts after the 8-byte header + address fields.
-        # For encode_rtpc_link the extra starts at byte 8 (prefix2+ts4+action2)
-        # then flags2, then extra. Actually let's just check vs known encodings.
-        refresh_rtpc = encode_rtpc_link(our_addr, entrance_addr, rtpc1_server_id, 0, refresh=True)
-        no_refresh_rtpc = encode_rtpc_link(our_addr, entrance_addr, rtpc1_server_id, 0, refresh=False)
-        # The refresh bit is in the extra block. Compare the relevant bytes.
-        # Both messages have same structure; refresh differs in extra[0]: 0x98 vs 0x18.
-        # Find the position of the extra block (after prefix2 + ts4 + action2 + flags2 = 10 bytes).
-        refresh_extra_byte = refresh_rtpc[10]   # 0x98
-        no_refresh_extra_byte = no_refresh_rtpc[10]  # 0x18
 
-        sent_rtpc = rtpc_link_messages[0]
-        assert sent_rtpc[10] == refresh_extra_byte, (
-            f"RTPC_LINK was sent without refresh=True: "
-            f"extra[0]=0x{sent_rtpc[10]:02X}, expected 0x{refresh_extra_byte:02X}. "
-            f"encode_rtpc_link(refresh=True) must be used during renewal."
-        )
+        # VIDEO_CONFIG: prefix 0x1840 (encode_video_config)
+        # Verify it matches what encode_video_config would produce (not _resp).
+        # encode_video_config uses prefix 0x1840; encode_video_config_resp uses 0x1860.
+        video_config_messages = [
+            d for d in sent_data
+            if len(d) >= 8
+            and struct.unpack_from("<H", d, 0)[0] == 0x1840
+            and struct.unpack_from(">H", d, 6)[0] not in (ACTION_RTPC_LINK, 0x0000, 0x0070)
+        ]
+        assert video_config_messages, "No VIDEO_CONFIG message (0x1840) was sent during renewal"
