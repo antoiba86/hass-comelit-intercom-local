@@ -2,16 +2,23 @@
 
 ## 0.1.4.2
 
-- **Fix: standalone door open broken after 0.1.4** — `ctpp_init_sequence` was sending the ACK pair (`0x1800`/`0x1820`) unconditionally on all paths, including the standalone door open. The original working implementation never sent the ACK pair for door opens (only VIP listener and video sessions need it). Added `send_ack` parameter to `ctpp_init_sequence`; standalone path now passes `send_ack=False`
-- **Fix: `read_response_ctpp` was never awaited** — missing `await` meant device responses were never drained before proceeding, leaving unread data in the socket buffer
-- **Refactor: unified door open entry point** — removed deprecated `open_door_fast` / `open_door_standalone` / `_open_regular_on_channel` / `_open_actuator_on_channel`; single `open_door` function selects fast or standalone path automatically; `CTPP_DOOR` cleanup only runs when we opened the channel
-- **Fix: inverted actuator/door init in `_open_door_on_channel`** — actuator was sending `encode_door_init` and regular door was sending `encode_actuator_init` (swapped ternary)
-- **Fix: several bugs in the refactored `open_door`** — missing `await` on `open_ctpp_channel` and `_open_door_on_channel` calls; `DeviceConfig` class passed instead of `config` instance
-- **Tests: end-to-end door flow coverage** — new `test_door_flow.py` exercises the full chain (`open_door` → `open_ctpp_channel` → `ctpp_init_sequence` → `_open_door_on_channel`) with only the TCP client mocked; includes regression test for `send_ack=False`
-- **Fix: door opening flow** — replaced magic number `8` with named constant `_CTPP_RESPONSE_MIN_LEN` in CTPP response parsing; filled in missing explanation for the minimum-length guard in `read_response_ctpp`
-- **Fix: door open during active video would kill the video** — the device's relay-activation response `0x1840/0x0003` with `sub=0x000E` was misclassified as CALL_END (which has `sub=0x0000`) and triggered a full inline re-establishment mid-door-open. Now the monitor inspects the sub-field and bare-ACKs the relay confirmation (PCAP-verified from `camera_feed_with_open_door_local.pcap`)
-- **Fix: video auto-restarted after door-open during call** — when the device ended the call on its own within the 10 s door-open delay, the coordinator's CALL_END handler saw the user-stopped flag still unset and scheduled a restart; the flag is now raised the moment the door button is pressed
-- **Fix: `AttributeError: 'NoneType' object has no attribute 'stop'`** — two concurrent `async_stop_video` calls could both pass the session-exists check and race; the coordinator now snapshots the session and clears it atomically before awaiting stop-callbacks
+**Door open fixes:**
+- **Fix: standalone door open broken** — ACK pair (`0x1800`/`0x1820`) was sent on all paths; standalone door open must never send it. Added `send_ack=False` parameter to `ctpp_init_sequence`
+- **Fix: `read_response_ctpp` was never awaited** — device responses were not drained, leaving stale data in the socket buffer
+- **Fix: inverted actuator/door init messages** — swapped ternary caused actuator to send `encode_door_init` and vice versa
+- **Fix: missing `await` and wrong class reference** — `open_ctpp_channel` and `_open_door_on_channel` were not awaited; `DeviceConfig` class was passed instead of the config instance
+- **Fix: `_CTPP_RESPONSE_MIN_LEN` constant** — replaced magic number `8` in response length guard with a named constant
+
+**Refactor:**
+- **Unified door open entry point** — removed `open_door_fast` / `open_door_standalone` / `_open_regular_on_channel` / `_open_actuator_on_channel`; single `open_door` selects fast or standalone path automatically
+
+**Tests:**
+- **End-to-end door flow coverage** — new `test_door_flow.py` exercises the full chain with only the TCP client mocked; includes regression test for `send_ack=False`
+
+**Video fixes:**
+- **Fix: door open during video triggered CTPP re-establishment** — relay response `0x1840/0x0003` was misclassified as CALL_END; monitor now inspects the sub-field and bare-ACKs relay confirmations
+- **Fix: video auto-restarted after door-open ended the call** — user-stopped flag is now set the moment the door button is pressed
+- **Fix: `AttributeError` on concurrent `async_stop_video`** — session is now snapshotted and cleared atomically before awaiting stop-callbacks
 
 ## 0.1.4.1
 

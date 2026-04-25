@@ -147,6 +147,7 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
             raise
 
         self._client = client
+        client.set_disconnect_callback(self._on_client_disconnect)
 
         # Start VIP event listener for doorbell ring detection, unless disabled.
         # The PUSH channel is one-shot FCM registration; actual call events
@@ -222,6 +223,7 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
             raise
 
         self._client = client
+        client.set_disconnect_callback(self._on_client_disconnect)
 
         if self.config_entry.options.get(CONF_ENABLE_NOTIFICATIONS, True):
             try:
@@ -327,13 +329,22 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
             await open_door(self._client, self._config, door)
 
     async def async_start_video(
-        self, auto_timeout: bool = True
+        self, auto_timeout: bool = True, by_user: bool = False
     ) -> VideoCallSession:
         """Start a video call session.
 
         Concurrent calls are dropped — the device can only negotiate one
         CTPP session at a time and a second concurrent start would conflict
         with the first and fail ~35 s later with a UDPM timeout.
+
+        Args:
+            auto_timeout: stop the session after VIDEO_SESSION_TIMEOUT seconds.
+            by_user: True when called from an explicit user action (button press).
+                     False for auto-restarts from CALL_END / timeout callbacks.
+                     Auto-restarts are silently dropped if the user has
+                     since stopped video (prevents a stale async_create_task
+                     from overriding a user stop and causing an infinite
+                     go2rtc reconnect loop).
         """
         if not self._config:
             raise RuntimeError("Not configured")
@@ -347,6 +358,15 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
         async with self._video_start_lock:
             if not self._client:
                 raise RuntimeError("Not connected")
+
+            # Drop auto-restarts that arrive after the user has stopped video.
+            # Race: _on_video_call_end schedules async_start_video() as a task;
+            # the user may stop video before the task executes.  Without this
+            # check the stale task would reset _video_stopped_by_user and call
+            # mark_ready(), causing go2rtc to reconnect into a dead stream.
+            if self._video_stopped_by_user and not by_user:
+                _LOGGER.debug("Skipping auto-restart — video was stopped by user")
+                raise RuntimeError("Video was stopped by user — not auto-restarting")
 
             # If the TCP connection died (120s receive-loop timeout) before the
             # health-check interval had a chance to reconnect, reconnect now so
@@ -412,7 +432,22 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
         if self._video_stopped_by_user:
             return
         _LOGGER.info("CALL_END received — scheduling session restart")
-        self.hass.async_create_task(self.async_start_video())
+        self.hass.async_create_task(self._auto_restart_video())
+
+    async def _auto_restart_video(self) -> None:
+        """Auto-restart video after CALL_END or timeout.
+
+        Calls async_start_video() without by_user=True so the call is
+        silently dropped if the user has stopped video in the meantime.
+        RuntimeError from that path is caught here to avoid HA logging an
+        unhandled task exception for a normal, expected situation.
+        """
+        try:
+            await self.async_start_video()
+        except RuntimeError as err:
+            _LOGGER.debug("Auto-restart skipped: %s", err)
+        except Exception:
+            _LOGGER.warning("Auto-restart failed", exc_info=True)
 
     @property
     def video_stopped_by_user(self) -> bool:
@@ -534,6 +569,18 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
     def video_session(self) -> VideoCallSession | None:
         """Return the active video call session, if any."""
         return self._video_session
+
+    def _on_client_disconnect(self) -> None:
+        """Called by the TCP client when the connection drops unexpectedly.
+
+        Schedules an immediate coordinator refresh so _async_update_data runs
+        within milliseconds and triggers reconnect, instead of waiting for the
+        next 30-second polling interval.
+        """
+        if self._client is None:
+            return  # already shut down
+        _LOGGER.debug("TCP connection lost — scheduling immediate reconnect")
+        self.hass.async_create_task(self.async_request_refresh())
 
     async def _async_update_data(self) -> DeviceConfig:
         """Health-check the connection; reconnect if needed."""

@@ -22,7 +22,6 @@ from .protocol import (
     encode_door_open_during_video,
     encode_rtpc_link,
     encode_video_config,
-    encode_video_config_resp,
 )
 from .rtp_receiver import RtpReceiver
 from .rtsp_server import LocalRtspServer
@@ -175,7 +174,12 @@ class VideoCallSession:
         entrance_addr: str,
         call_counter: int,
     ) -> int:
-        """Read and ACK the device's 0x1840/0x000A RTPC link. Returns counter."""
+        """Read and ACK the device's RTPC link (action 0x000A). Returns counter.
+
+        PCAP-verified: during initial start the device sends 0x1840/0x000A;
+        during inline re-establishment it sends 0x1860/0x000A instead.
+        Both are accepted.
+        """
         for _ in range(5):
             resp = await client.read_response(ctpp, timeout=VIDEO_RESPONSE_TIMEOUT)
             if not resp or len(resp) < 2:
@@ -184,7 +188,7 @@ class VideoCallSession:
             action = (
                 struct.unpack_from(">H", resp, 6)[0] if len(resp) >= 8 else 0
             )
-            if msg_type == 0x1840 and action == 0x000A:
+            if msg_type in (0x1840, 0x1860) and action == 0x000A:
                 call_counter += _CTR_INCR_BYTE5
                 await client.send_binary(
                     ctpp,
@@ -586,8 +590,11 @@ class VideoCallSession:
 
         The device sends periodic 0x1840 messages throughout the call:
         - 0x0000: keepalive — ACK with bare 0x1800
-        - 0x0003: CALL_END — device lease timer expired; perform inline
-            re-establishment (same TCP connection, no session restart).
+        - 0x0003 / sub=0x0000: CALL_END — device lease timer expired; perform
+            inline re-establishment (same TCP connection, no session restart).
+        - 0x0003 / sub=0x000E: CALL_END triggered by door-open relay activation.
+            PCAP-verified (camera_feed_with_open_door_local.pcap): same renewal
+            sequence as the periodic CALL_END — NOT a bare ACK.
         0x1800 device ACKs are silently ignored.
         """
         try:
@@ -600,10 +607,17 @@ class VideoCallSession:
                     struct.unpack_from(">H", resp, 6)[0]
                     if len(resp) >= 8 else 0
                 )
+                sub = (
+                    struct.unpack_from(">H", resp, 8)[0]
+                    if len(resp) >= 10 else 0
+                )
                 if msg_type == 0x1840:
                     if action == 0x0003:
-                        # CALL_END: full media session restart on same TCP connection.
-                        _LOGGER.debug("CTPP monitor: CALL_END received — re-establishing")
+                        # CALL_END (sub=0x0000 = timer, sub=0x000E = door-open triggered)
+                        _LOGGER.debug(
+                            "CTPP monitor: CALL_END received (sub=0x%04X) — re-establishing",
+                            sub,
+                        )
                         try:
                             async with self._ctpp_lock:
                                 call_counter = await self._inline_reestablish(
@@ -623,16 +637,29 @@ class VideoCallSession:
                                 self._on_call_end()
                             return
                     else:
-                        # Keepalive (0x0000) or other 0x1840 — bare ACK
+                        # Keepalive (0x0000) or any other non-CALL_END 0x1840 — bare ACK.
                         async with self._ctpp_lock:
                             call_counter += _CTR_INCR_BYTE4
                             self._call_counter = call_counter
                             ack = encode_call_response_ack(our_addr, entrance_addr, call_counter)
                             await client.send_binary(ctpp, ack)
                         _LOGGER.debug(
-                            "CTPP monitor: ACKed 0x1840/0x%04X, counter=0x%08X",
-                            action, call_counter,
+                            "CTPP monitor: ACKed 0x1840/0x%04X (sub=0x%04X), counter=0x%08X",
+                            action, sub, call_counter,
                         )
+                elif msg_type == 0x1860:
+                    # Device 0x1860 messages during an active session (e.g.
+                    # 0x000A RTPC link that _ack_device_rtpc_link missed, or
+                    # other device-initiated messages) — bare ACK.
+                    async with self._ctpp_lock:
+                        call_counter += _CTR_INCR_BYTE4
+                        self._call_counter = call_counter
+                        ack = encode_call_response_ack(our_addr, entrance_addr, call_counter)
+                        await client.send_binary(ctpp, ack)
+                    _LOGGER.debug(
+                        "CTPP monitor: ACKed 0x1860/0x%04X, counter=0x%08X",
+                        action, call_counter,
+                    )
                 elif msg_type == 0x1800:
                     pass  # device ACK — no response needed
                 else:
@@ -657,11 +684,19 @@ class VideoCallSession:
     ) -> int:
         """Perform inline re-establishment after CALL_END, returning updated counter.
 
-        A simple RTPC_LINK-refresh does NOT work — the device answers with
-        0x1860/0x000A but never reopens its own RTPC channel, so video stays
-        frozen.  A full media session restart on the same TCP/CTPP is needed:
-        new call_init + codec exchange + RTPC_LINK + VIDEO_CONFIG, reusing
-        the shared helpers so the logic stays in sync with initial start().
+        Full media session restart on the same TCP/CTPP connection — verified
+        working in commit efc75d91 on the dedicated-connection architecture and
+        confirmed to work identically on the shared-connection architecture.
+
+        Sequence (from working reference implementation):
+        1. ACK CALL_END (+byte5)
+        2. CTPP init + ACK pair (resets device-side session state)
+        3. New call_init + codec exchange (reuse existing RTPC channels)
+        4. RTPC_LINK + VIDEO_CONFIG
+        5. Wait for device RTPC, ACK its link
+        6. HANGUP/ZERO (0x1840/0x0000) — signals "call accepted" to device
+        7. Renewal peer/accept (0x1860/0x0070) — triggers audio RTPC reopening
+        8. Drain stale RTSP queues
         """
         apt_addr = our_addr[:-1]
         apt_sub = int(our_addr[-1])
@@ -673,7 +708,7 @@ class VideoCallSession:
             encode_call_response_ack(our_addr, entrance_addr, call_counter),
         )
 
-        # 2. CTPP init + ACK pair (shared helper)
+        # 2. CTPP init + ACK pair
         init_ts = self._ts()
         await ctpp_init_sequence(
             client, ctpp, apt_addr, apt_sub, our_addr, init_ts,
@@ -683,7 +718,7 @@ class VideoCallSession:
         # 3. Placeholder for device's new RTPC channel
         device_rtpc = client.register_placeholder_channel("RTPC_DEVICE_REEST")
 
-        # 4. Call init + codec ACK + codec exchange
+        # 4. Call init + codec ACK + codec exchange (resets call counter to new ts)
         call_ts = (init_ts + 1) & 0xFFFFFFFF
         call_counter = call_ts
         await client.send_binary(
@@ -718,7 +753,7 @@ class VideoCallSession:
             client, ctpp, our_addr, entrance_addr, call_counter
         )
 
-        # 7. HANGUP/ZERO to signal call accepted again
+        # 7. HANGUP/ZERO — signals "call accepted" to device (required for renewal)
         call_counter += _CTR_INCR_BYTE4
         await client.send_binary(
             ctpp,
@@ -727,8 +762,7 @@ class VideoCallSession:
             ),
         )
 
-        # 8. Renewal peer/accept (0x1860/0x0070) — triggers the device to
-        # reopen the audio RTPC channel.
+        # 8. Renewal peer/accept (0x1860/0x0070) — triggers audio RTPC reopening
         call_counter += _CTR_INCR_BYTE4
         await client.send_binary(
             ctpp,
@@ -736,7 +770,7 @@ class VideoCallSession:
         )
         _LOGGER.debug("Re-establish: sent renewal peer/accept (0x1860/0x0070)")
 
-        # 9. Drain stale RTSP queues while keeping RTP seq/ts monotonic.
+        # 9. Drain stale RTSP queues while keeping RTP seq/ts monotonic
         if self._rtsp_server:
             self._rtsp_server.reset(renewal=True)
 
@@ -777,12 +811,17 @@ class VideoCallSession:
         PCAP-verified: pressing the phone button in the app sends a single
         0x1840/0x0070 message. Audio does NOT flow yet — audio only starts
         at the next renewal cycle when _inline_reestablish sends 0x1860/0x0070.
+
+        Uses _ctpp_lock and self._call_counter (not the stale call_counter
+        parameter) so the counter is in sync with keepalive ACKs that
+        _ctpp_monitor_loop may have sent during the 6s readiness wait.
         """
-        call_counter += _CTR_INCR_BYTE4
-        await client.send_binary(
-            ctpp,
-            encode_answer_peer(our_addr, entrance_addr, call_counter),
-        )
+        async with self._ctpp_lock:
+            self._call_counter += _CTR_INCR_BYTE4
+            await client.send_binary(
+                ctpp,
+                encode_answer_peer(our_addr, entrance_addr, self._call_counter),
+            )
         _LOGGER.info("Answer peer/accept (0x70) sent — audio should start within ~400ms")
 
     async def async_open_door_on_ctpp(

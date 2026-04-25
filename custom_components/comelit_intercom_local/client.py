@@ -48,6 +48,7 @@ class IconaBridgeClient:
         self._callbacks: dict[int, asyncio.Future] = {}
         self._push_callback: Callable[[dict], None] | None = None
         self._connected = False
+        self._disconnect_callback: Callable[[], None] | None = None
 
     @property
     def connected(self) -> bool:
@@ -143,6 +144,14 @@ class IconaBridgeClient:
             _LOGGER.debug("Read binary body (%d bytes): %s", len(body), body.hex(" ")[:200])
         return request_id, body
 
+    def set_disconnect_callback(self, callback: Callable[[], None]) -> None:
+        """Register a callback invoked when the TCP connection drops unexpectedly.
+
+        Called from the receive loop on EOF, 120s timeout, or unhandled error.
+        Not called on deliberate shutdown (CancelledError / disconnect()).
+        """
+        self._disconnect_callback = callback
+
     async def _receive_loop(self) -> None:
         """Background task that reads packets and dispatches them.
 
@@ -152,6 +161,7 @@ class IconaBridgeClient:
         device goes to sleep without sending a FIN.
         """
         _LOGGER.debug("Receive loop started")
+        unexpected = False
         try:
             while self._connected:
                 _LOGGER.debug("Waiting for next packet...")
@@ -164,16 +174,22 @@ class IconaBridgeClient:
                         "No data received for 120s — marking connection dead"
                     )
                     self._connected = False
+                    unexpected = True
                     break
                 self._dispatch(request_id, body)
         except asyncio.IncompleteReadError:
             _LOGGER.info("Connection closed by device")
             self._connected = False
+            unexpected = True
         except asyncio.CancelledError:
             raise
         except Exception:
             _LOGGER.exception("Error in receive loop")
             self._connected = False
+            unexpected = True
+
+        if unexpected and self._disconnect_callback:
+            self._disconnect_callback()
 
     def _dispatch(self, request_id: int, body: bytes) -> None:
         """Dispatch a received packet to the appropriate handler."""

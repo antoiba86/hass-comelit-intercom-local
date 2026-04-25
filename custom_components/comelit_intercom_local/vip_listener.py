@@ -214,12 +214,22 @@ class VipEventListener:
         _is_real_vip = prefix == PREFIX_CALL_INIT or (
             prefix == PREFIX_VIP_EVENT and action not in (0x0000, ACTION_CALL_TERMINATED)
         )
+        # 0x1840 retransmits after video stops are expected — we don't ACK them
+        # (no valid counter) so the device retransmits briefly then stops on its own.
+        _is_video_tail = prefix == PREFIX_EVENT
         if is_retransmit:
-            _LOGGER.warning(
-                "VIP RETRANSMIT: prefix=0x%04X action=0x%04X ts=0x%08X "
-                "— our previous ACK was not accepted by device (addrs=%s)",
-                prefix, action, ts, addresses,
-            )
+            if _is_video_tail:
+                _LOGGER.debug(
+                    "VIP: expected video-tail retransmit ignored "
+                    "(prefix=0x%04X action=0x%04X ts=0x%08X)",
+                    prefix, action, ts,
+                )
+            else:
+                _LOGGER.warning(
+                    "VIP RETRANSMIT: prefix=0x%04X action=0x%04X ts=0x%08X "
+                    "— our previous ACK was not accepted by device (addrs=%s)",
+                    prefix, action, ts, addresses,
+                )
         elif _is_real_vip:
             _LOGGER.info(
                 "VIP event: prefix=0x%04X action=0x%04X ts=0x%08X flags=0x%04X addrs=%s (%d bytes)",

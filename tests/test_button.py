@@ -127,24 +127,41 @@ class TestComelitDoorButton:
 
     @pytest.mark.asyncio
     async def test_stop_video_after_delay_stops_active_session(self):
-        """_stop_video_after_delay calls request_video_stop then async_stop_video."""
+        """_stop_video_after_delay calls async_stop_video once the delay elapses.
+
+        The user-initiated-stop flag is set earlier, in async_press, so this
+        method only needs to invoke async_stop_video after the sleep.
+        """
         btn = _make_door_button()
         session = MagicMock()
         session.active = True
         btn.coordinator.video_session = session
 
-        call_order = []
-        btn.coordinator.request_video_stop = MagicMock(
-            side_effect=lambda: call_order.append("request")
-        )
-        btn.coordinator.async_stop_video = AsyncMock(
-            side_effect=lambda: call_order.append("stop")
-        )
+        btn.coordinator.async_stop_video = AsyncMock()
 
         with patch("asyncio.sleep", new_callable=AsyncMock):
             await btn._stop_video_after_delay(10)
 
-        assert call_order == ["request", "stop"]
+        btn.coordinator.async_stop_video.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_press_marks_stop_user_initiated_before_delay(self):
+        """Door press must call request_video_stop immediately so a CALL_END
+        arriving before the 10s delay isn't auto-restarted.
+        """
+        btn = _make_door_button()
+        session = MagicMock()
+        session.active = True
+        btn.coordinator.video_session = session
+
+        # Silence the scheduled background task
+        btn.hass.async_create_task = lambda coro: coro.close()
+
+        btn.coordinator.request_video_stop = MagicMock()
+
+        await btn.async_press()
+
+        btn.coordinator.request_video_stop.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_stop_video_after_delay_noop_when_session_gone(self):

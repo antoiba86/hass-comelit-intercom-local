@@ -294,6 +294,59 @@ class TestCtppMonitorLoop:
         )
 
     @pytest.mark.asyncio
+    async def test_ctpp_relay_activation_bare_acks_without_reestablish(self):
+        """0x1840/0x0003/sub=0x000E (relay activated after door-open) must
+        bare-ACK, NOT trigger inline re-establish (which would kill the
+        video session mid-door-open).
+        """
+        import struct
+        session = self._make_session()
+
+        mock_client = MagicMock()
+        # Relay activation: action=0x0003, sub=0x000E, plus padding so
+        # the length is >= 10 bytes and our sub-field check fires.
+        relay_body = (
+            struct.pack("<H", 0x1840)
+            + struct.pack("<I", 0xDEADBEEF)
+            + struct.pack(">H", 0x0003)
+            + struct.pack(">H", 0x000E)
+            + b"\x00" * 8
+        )
+        call_count = 0
+
+        async def mock_read_response(channel, timeout=2.0):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return relay_body
+            session._active = False
+            return None
+
+        mock_client.read_response = mock_read_response
+        mock_client.send_binary = AsyncMock()
+
+        reestablish_called = False
+
+        async def mock_reestablish(*args, **kwargs):
+            nonlocal reestablish_called
+            reestablish_called = True
+            return 0x10000000
+
+        session._inline_reestablish = mock_reestablish
+
+        await session._ctpp_monitor_loop(
+            mock_client, MagicMock(), "SB0000061", "SB100001", 0x10000000,
+            rtpc1_server_id=0xABCD, media_req_id=0x1234,
+        )
+
+        # Must NOT re-establish — that was the bug
+        assert not reestablish_called
+        # Must bare-ACK with 0x1800
+        mock_client.send_binary.assert_awaited_once()
+        sent = mock_client.send_binary.await_args.args[1]
+        assert struct.unpack_from("<H", sent, 0)[0] == 0x1800
+
+    @pytest.mark.asyncio
     async def test_ctpp_device_acks_are_ignored(self):
         """0x1800 device ACKs should not trigger any response."""
         import struct
@@ -322,3 +375,303 @@ class TestCtppMonitorLoop:
         )
 
         assert len(sent_data) == 0  # no response to device ACKs
+
+    @pytest.mark.asyncio
+    async def test_ctpp_0x1860_message_is_bare_acked(self):
+        """0x1860 messages in the monitor loop (e.g. stray RTPC link after
+        renewal) must be bare-ACKed with 0x1800, not logged as unexpected.
+
+        PCAP-verified: device sends 0x1860/0x000A during renewal; if
+        _ack_device_rtpc_link missed it, the monitor loop must still ACK it.
+        """
+        import struct
+
+        session = self._make_session()
+        sent_data = []
+
+        mock_client = MagicMock()
+        call_count = 0
+
+        async def mock_read_response(channel, timeout=2.0):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return (
+                    struct.pack("<H", 0x1860)
+                    + struct.pack("<I", 0xCAFEBABE)
+                    + struct.pack(">H", 0x000A)
+                )
+            session._active = False
+            return None
+
+        mock_client.read_response = mock_read_response
+        mock_client.send_binary = AsyncMock(side_effect=lambda ch, data: sent_data.append(data))
+
+        await session._ctpp_monitor_loop(
+            mock_client, MagicMock(), "SB0000061", "SB100001", 0x10000000,
+            rtpc1_server_id=0xABCD, media_req_id=0x1234,
+        )
+
+        assert len(sent_data) == 1
+        prefix = struct.unpack_from("<H", sent_data[0], 0)[0]
+        assert prefix == 0x1800, f"Expected 0x1800 ACK, got 0x{prefix:04X}"
+
+
+class TestAckDeviceRtpcLink:
+    """Tests for _ack_device_rtpc_link — accepts both 0x1840 and 0x1860 prefixes."""
+
+    def _make_session(self) -> "VideoCallSession":
+        session = VideoCallSession.__new__(VideoCallSession)
+        session._active = True
+        session._timeout_task = None
+        session._tcp_task = None
+        session._ctpp_task = None
+        session._rtp_receiver = None
+        session._client = None
+        session._rtsp_server = None
+        session._external_rtsp = False
+        session._ctpp_lock = asyncio.Lock()
+        session._call_counter = 0
+        return session
+
+    @pytest.mark.asyncio
+    async def test_accepts_0x1840_rtpc_link(self):
+        """ACKs device's 0x1840/0x000A (initial-start RTPC link)."""
+        import struct
+
+        session = self._make_session()
+        sent_data = []
+
+        mock_client = MagicMock()
+        call_count = 0
+
+        async def mock_read_response(channel, timeout=2.0):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return (
+                    struct.pack("<H", 0x1840)
+                    + struct.pack("<I", 0x11223344)
+                    + struct.pack(">H", 0x000A)
+                )
+            return None
+
+        mock_client.read_response = mock_read_response
+        mock_client.send_binary = AsyncMock(side_effect=lambda ch, data: sent_data.append(data))
+
+        result = await session._ack_device_rtpc_link(
+            mock_client, MagicMock(), "SB0000061", "SB100001", 0x10000000
+        )
+
+        assert len(sent_data) == 1
+        prefix = struct.unpack_from("<H", sent_data[0], 0)[0]
+        assert prefix == 0x1800
+
+    @pytest.mark.asyncio
+    async def test_accepts_0x1860_rtpc_link(self):
+        """ACKs device's 0x1860/0x000A (renewal RTPC link, PCAP-verified).
+
+        During inline re-establishment the device sends RTPC link with prefix
+        0x1860 instead of 0x1840. The function must accept both and ACK them
+        identically.
+        """
+        import struct
+
+        session = self._make_session()
+        sent_data = []
+
+        mock_client = MagicMock()
+        call_count = 0
+
+        async def mock_read_response(channel, timeout=2.0):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return (
+                    struct.pack("<H", 0x1860)
+                    + struct.pack("<I", 0x11223344)
+                    + struct.pack(">H", 0x000A)
+                )
+            return None
+
+        mock_client.read_response = mock_read_response
+        mock_client.send_binary = AsyncMock(side_effect=lambda ch, data: sent_data.append(data))
+
+        result = await session._ack_device_rtpc_link(
+            mock_client, MagicMock(), "SB0000061", "SB100001", 0x10000000
+        )
+
+        assert len(sent_data) == 1, "Device 0x1860/0x000A RTPC link was not ACKed"
+        prefix = struct.unpack_from("<H", sent_data[0], 0)[0]
+        assert prefix == 0x1800
+
+    @pytest.mark.asyncio
+    async def test_skips_0x1800_and_waits_for_000A(self):
+        """0x1800 device ACKs before the RTPC link are skipped, not mistaken for it."""
+        import struct
+
+        session = self._make_session()
+        sent_data = []
+
+        mock_client = MagicMock()
+        call_count = 0
+
+        async def mock_read_response(channel, timeout=2.0):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return struct.pack("<H", 0x1800) + struct.pack("<I", 0) + struct.pack(">H", 0)
+            if call_count == 2:
+                return (
+                    struct.pack("<H", 0x1860)
+                    + struct.pack("<I", 0x99887766)
+                    + struct.pack(">H", 0x000A)
+                )
+            return None
+
+        mock_client.read_response = mock_read_response
+        mock_client.send_binary = AsyncMock(side_effect=lambda ch, data: sent_data.append(data))
+
+        await session._ack_device_rtpc_link(
+            mock_client, MagicMock(), "SB0000061", "SB100001", 0x10000000
+        )
+
+        assert len(sent_data) == 1
+        prefix = struct.unpack_from("<H", sent_data[0], 0)[0]
+        assert prefix == 0x1800
+
+
+class TestInlineReestablish:
+    """Tests for _inline_reestablish — the CALL_END renewal sequence."""
+
+    @pytest.mark.asyncio
+    async def test_reestablish_uses_refresh_rtpc_link_and_video_config_resp(self):
+        """_inline_reestablish must send encode_rtpc_link(refresh=True) and
+        encode_video_config_resp, NOT encode_video_config.
+
+        This is PCAP-verified: during renewal the Android app sends RTPC_LINK
+        with first_byte=0x98 (refresh=True) and VIDEO_CONFIG with prefix 0x1860
+        (encode_video_config_resp), not the initial-start variants.
+        """
+        import struct
+        from custom_components.comelit_intercom_local.protocol import (
+            encode_rtpc_link,
+            encode_video_config,
+            encode_video_config_resp,
+        )
+
+        session = VideoCallSession.__new__(VideoCallSession)
+        session._active = True
+        session._timeout_task = None
+        session._tcp_task = None
+        session._ctpp_task = None
+        session._rtp_receiver = None
+        session._external_rtsp = False
+        session._ctpp_lock = asyncio.Lock()
+        session._call_counter = 0
+        session._rtsp_server = None
+
+        our_addr = "SB0000061"
+        entrance_addr = "SB100001"
+        rtpc1_server_id = 0xABCD
+        media_req_id = 0x1234
+
+        sent_data = []
+        read_count = 0
+
+        # Minimal device response sequence for _inline_reestablish:
+        # ctpp_init_sequence reads up to 2 responses; call_init reads 1;
+        # _run_codec_exchange reads until 0x0002 (call accepted).
+        def make_0x1840(action: int) -> bytes:
+            return (
+                struct.pack("<H", 0x1840)
+                + struct.pack("<I", 0xDEADBEEF)
+                + struct.pack(">H", action)
+            )
+
+        def make_0x1800() -> bytes:
+            return struct.pack("<H", 0x1800) + struct.pack("<I", 0) + struct.pack(">H", 0)
+
+        # Response sequence:
+        # [0-1] ctpp_init_sequence drain (2 reads)
+        # [2]   call_init ACK read
+        # [3]   codec exchange: 0x0002 = call accepted
+        # [4+]  _ack_device_rtpc_link: returns None (timeout suppressed)
+        responses = [
+            make_0x1800(),        # ctpp_init drain 1
+            make_0x1800(),        # ctpp_init drain 2
+            make_0x1840(0x0001),  # call_init ACK (any action)
+            make_0x1840(0x0002),  # codec exchange: call accepted
+            None,                 # _ack_device_rtpc_link timeout
+        ]
+
+        async def mock_read_response(channel, timeout=2.0):
+            nonlocal read_count
+            if read_count < len(responses):
+                resp = responses[read_count]
+                read_count += 1
+                return resp
+            return None
+
+        mock_client = MagicMock()
+        mock_client.read_response = mock_read_response
+        mock_client.send_binary = AsyncMock(side_effect=lambda ch, data: sent_data.append(data))
+
+        # register_placeholder_channel must return a channel with an open_event
+        placeholder = MagicMock()
+        placeholder.open_event = asyncio.Event()
+        placeholder.open_event.set()  # simulate device opened it immediately
+        placeholder.server_channel_id = 0x9999
+        mock_client.register_placeholder_channel = MagicMock(return_value=placeholder)
+
+        mock_ctpp = MagicMock()
+
+        # Provide a fixed timestamp so we can compute expected messages
+        fixed_ts = 0x01020304
+        session._ts = lambda: fixed_ts
+
+        await session._inline_reestablish(
+            mock_client, mock_ctpp,
+            our_addr, entrance_addr,
+            rtpc1_server_id, media_req_id,
+            call_counter=0x00010000,
+        )
+
+        # Extract the raw bytes of every message sent
+        sent_prefixes = [struct.unpack_from("<H", d, 0)[0] for d in sent_data]
+
+        # encode_video_config_resp uses prefix 0x1860
+        # encode_video_config uses prefix 0x1840
+        # We must see 0x1860 and NOT only 0x1840 for the video-config message.
+        assert 0x1860 in sent_prefixes, (
+            "encode_video_config_resp (prefix 0x1860) was not sent during renewal. "
+            "encode_video_config (0x1840) must NOT be used here."
+        )
+
+        # Verify RTPC_LINK uses refresh=True (first_byte=0x98) —
+        # find the RTPC_LINK message (action=0x000A, prefix=0x1840)
+        ACTION_RTPC_LINK = 0x000A
+        rtpc_link_messages = [
+            d for d in sent_data
+            if len(d) >= 8
+            and struct.unpack_from("<H", d, 0)[0] == 0x1840
+            and struct.unpack_from(">H", d, 6)[0] == ACTION_RTPC_LINK
+        ]
+        assert rtpc_link_messages, "No RTPC_LINK message (0x1840/0x000A) was sent"
+        # The extra block starts after the 8-byte header + address fields.
+        # For encode_rtpc_link the extra starts at byte 8 (prefix2+ts4+action2)
+        # then flags2, then extra. Actually let's just check vs known encodings.
+        refresh_rtpc = encode_rtpc_link(our_addr, entrance_addr, rtpc1_server_id, 0, refresh=True)
+        no_refresh_rtpc = encode_rtpc_link(our_addr, entrance_addr, rtpc1_server_id, 0, refresh=False)
+        # The refresh bit is in the extra block. Compare the relevant bytes.
+        # Both messages have same structure; refresh differs in extra[0]: 0x98 vs 0x18.
+        # Find the position of the extra block (after prefix2 + ts4 + action2 + flags2 = 10 bytes).
+        refresh_extra_byte = refresh_rtpc[10]   # 0x98
+        no_refresh_extra_byte = no_refresh_rtpc[10]  # 0x18
+
+        sent_rtpc = rtpc_link_messages[0]
+        assert sent_rtpc[10] == refresh_extra_byte, (
+            f"RTPC_LINK was sent without refresh=True: "
+            f"extra[0]=0x{sent_rtpc[10]:02X}, expected 0x{refresh_extra_byte:02X}. "
+            f"encode_rtpc_link(refresh=True) must be used during renewal."
+        )
