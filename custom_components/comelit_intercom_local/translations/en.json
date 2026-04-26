@@ -11,10 +11,12 @@
       "init": {
         "title": "Comelit Intercom Options",
         "data": {
-          "enable_notifications": "Enable doorbell notifications"
+          "enable_notifications": "Enable doorbell notifications",
+          "hd_video": "HD video quality"
         },
         "data_description": {
-          "enable_notifications": "Receive doorbell ring and missed call events from the intercom"
+          "enable_notifications": "Receive doorbell ring and missed call events from the intercom",
+          "hd_video": "Stream at full resolution (800×480) instead of 320×240. Higher bandwidth."
         }
       }
     }

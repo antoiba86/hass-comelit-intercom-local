@@ -267,8 +267,6 @@ class ComelitIntercomCard extends HTMLElement {
       show_state: false,
     });
     card.hass = this._hass;
-    // Guard against late arrival — if state flipped back to idle while we
-    // were awaiting the helpers, don't mount a stale live card.
     if (!this._streaming) return;
     this._liveCard = card;
     slot.appendChild(card);

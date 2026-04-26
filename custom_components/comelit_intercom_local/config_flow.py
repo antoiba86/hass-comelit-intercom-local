@@ -13,7 +13,15 @@ from homeassistant.const import CONF_HOST, CONF_PASSWORD, CONF_PORT, CONF_TOKEN
 
 from .auth import authenticate
 from .client import IconaBridgeClient
-from .const import CONF_ENABLE_NOTIFICATIONS, CONF_HTTP_PORT, DEFAULT_HTTP_PORT, DEFAULT_PORT, DOMAIN
+from .const import (
+    CONF_ENABLE_NOTIFICATIONS,
+    CONF_HD_VIDEO,
+    CONF_HTTP_PORT,
+    DEFAULT_HD_VIDEO,
+    DEFAULT_HTTP_PORT,
+    DEFAULT_PORT,
+    DOMAIN,
+)
 from .exceptions import (
     AuthenticationError,
     ConnectionComelitError as ComelitConnectionError,
@@ -117,10 +125,14 @@ class ComelitLocalOptionsFlow(config_entries.OptionsFlow):
         if user_input is not None:
             return self.async_create_entry(title="", data=user_input)
 
-        current = self._config_entry.options.get(CONF_ENABLE_NOTIFICATIONS, True)
+        current_notif = self._config_entry.options.get(CONF_ENABLE_NOTIFICATIONS, True)
+        current_hd = self._config_entry.options.get(CONF_HD_VIDEO, DEFAULT_HD_VIDEO)
         return self.async_show_form(
             step_id="init",
             data_schema=vol.Schema(
-                {vol.Required(CONF_ENABLE_NOTIFICATIONS, default=current): bool}
+                {
+                    vol.Required(CONF_ENABLE_NOTIFICATIONS, default=current_notif): bool,
+                    vol.Required(CONF_HD_VIDEO, default=current_hd): bool,
+                }
             ),
         )

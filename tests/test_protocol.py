@@ -24,6 +24,7 @@ from custom_components.comelit_intercom_local.protocol import (
     encode_json_message,
     encode_open_door,
     encode_rtpc_link,
+    encode_video_config,
     encode_video_config_resp,
     is_json_body,
     parse_command_response,
@@ -194,6 +195,64 @@ class TestVideoPayloads:
         # Should NOT contain the 800x480 resolution from encode_video_config
         assert struct.pack("<H", 800) not in msg
         assert struct.pack("<H", 480) not in msg
+
+
+class TestVideoConfigHD:
+    """HD/SD selection in encode_video_config (PCAP-verified bytes).
+
+    Source: docs/PushButtonHDVideo_25_Apr_21_45_37.pcap
+    SD = frame 217, HD = frame 296 — only two fields differ.
+    """
+
+    def test_sd_param_a_zero(self):
+        msg = encode_video_config("SB0000062", "SB100001", 0x4FFC, 0x10C7D721)
+        # The 4-byte param_a after 0xFFFF is all zero in SD mode
+        assert b"\xff\xff\x00\x00\x00\x00" in msg
+
+    def test_hd_param_a_1000(self):
+        msg = encode_video_config(
+            "SB0000062", "SB100001", 0x4FFC, 0x10C7D721, hd=True
+        )
+        # In HD mode, param_a = 1000 (LE32 = e8 03 00 00)
+        assert b"\xff\xff\xe8\x03\x00\x00" in msg
+
+    def test_sd_secondary_resolution(self):
+        msg = encode_video_config("SB0000062", "SB100001", 0x4FFC, 0x10C7D721)
+        # SD secondary resolution = 320x240
+        assert struct.pack("<HH", 320, 240) in msg
+
+    def test_hd_secondary_resolution_matches_primary(self):
+        msg = encode_video_config(
+            "SB0000062", "SB100001", 0x4FFC, 0x10C7D721, hd=True
+        )
+        # HD secondary resolution = 800x480 (same as primary)
+        assert struct.pack("<HH", 320, 240) not in msg
+        # Primary 800x480 + secondary 800x480 = 8 contiguous bytes
+        assert struct.pack("<HHHH", 800, 480, 800, 480) in msg
+
+    def test_hd_pcap_exact_bytes(self):
+        """HD encoder reproduces frame 296 from the reference pcap exactly."""
+        msg = encode_video_config(
+            caller="SB0000062",
+            callee="SB100001",
+            rtpc2_req_id=0x4FFC,
+            timestamp=0x10C7D721,
+            fps=16,
+            hd=True,
+        )
+        # Body bytes from frame 296 (after 8-byte header)
+        expected_body = bytes.fromhex(
+            "401821d7c710"        # prefix + counter
+            "001a0011"            # action 0x001A, sub 0x0011
+            "143200000000fc4fffff" # extra header (rtpc2_id LE = 0x4FFC)
+            "e8030000"            # param_a = 1000 (HD)
+            "2003e001"            # 800x480 primary
+            "2003e001"            # 800x480 secondary (HD)
+            "10000000"            # fps=16, 2 zeros
+            "ffffffff"
+            "5342303030303036320053423130303030310000"  # caller + callee
+        )
+        assert msg == expected_body
 
 
 class TestAnswerSequencePayloads:

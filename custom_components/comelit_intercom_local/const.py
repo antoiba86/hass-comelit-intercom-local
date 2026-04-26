@@ -7,6 +7,8 @@ MODEL = "6701W"
 CONF_HTTP_PORT = "http_port"
 CONF_VIDEO_AUTO_RECONNECT = "video_auto_reconnect"
 CONF_ENABLE_NOTIFICATIONS = "enable_notifications"
+CONF_HD_VIDEO = "hd_video"
+DEFAULT_HD_VIDEO = True
 
 DEFAULT_PORT = 64100
 DEFAULT_HTTP_PORT = 8080

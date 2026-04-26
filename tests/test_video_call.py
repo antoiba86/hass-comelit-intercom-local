@@ -561,6 +561,7 @@ class TestInlineReestablish:
         session._ctpp_lock = asyncio.Lock()
         session._call_counter = 0
         session._rtsp_server = None
+        session._hd = False
 
         our_addr = "SB0000061"
         entrance_addr = "SB100001"

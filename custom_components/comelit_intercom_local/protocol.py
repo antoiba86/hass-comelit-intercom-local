@@ -404,22 +404,28 @@ def encode_video_config(
     width: int = VIDEO_WIDTH,
     height: int = VIDEO_HEIGHT,
     fps: int = VIDEO_FPS,
+    hd: bool = False,
 ) -> bytes:
     """Encode video config trigger (4018 prefix, action 0x001A).
 
     This is the final message that triggers the device to start UDP video.
-    Extra: [0x14 0x32] [4 zeros] [rtpc2_req_id LE16] [0xFFFF] [4 zeros]
-           [width LE16] [height LE16] [width/2 LE16] [height/2 LE16] [fps LE16] [2 zeros]
+    Extra: [0x14 0x32] [4 zeros] [rtpc2_req_id LE16] [0xFFFF] [param_a LE32]
+           [width LE16] [height LE16] [sec_w LE16] [sec_h LE16] [fps LE16] [2 zeros]
+
+    HD mode (PCAP-verified, docs/PushButtonHDVideo_25_Apr_21_45_37.pcap):
+      - param_a = 1000 (LE32) instead of 0
+      - secondary resolution = (width, height) instead of (320, 240)
     """
     extra = bytearray()
     extra += bytes([0x14, 0x32, 0x00, 0x00, 0x00, 0x00])
     extra += struct.pack("<H", rtpc2_req_id)
-    extra += bytes([0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00])
+    extra += b"\xff\xff"
+    extra += struct.pack("<I", 1000 if hd else 0)
     extra += struct.pack("<H", width)
     extra += struct.pack("<H", height)
-    # PCAP shows 320x240 as the secondary resolution (not width//2)
-    extra += struct.pack("<H", 320)
-    extra += struct.pack("<H", 240)
+    sec_w, sec_h = (width, height) if hd else (320, 240)
+    extra += struct.pack("<H", sec_w)
+    extra += struct.pack("<H", sec_h)
     extra += struct.pack("<H", fps)
     extra += bytes([0x00, 0x00])
     return _build_ctpp_video_msg(
@@ -461,20 +467,24 @@ def encode_answer_video_reconfig(
     width: int = VIDEO_WIDTH,
     height: int = VIDEO_HEIGHT,
     fps: int = VIDEO_FPS,
+    hd: bool = False,
 ) -> bytes:
     """Encode answer sequence message 1: video config re-negotiate.
 
     Identical to encode_video_config but callee is apt_addr (not entrance_addr).
     PCAP-verified: prefix=0x1840, callee="SB000006" (apt_address without subaddress).
+    See encode_video_config for the HD mode field semantics.
     """
     extra = bytearray()
     extra += bytes([0x14, 0x32, 0x00, 0x00, 0x00, 0x00])
     extra += struct.pack("<H", rtpc2_req_id)
-    extra += bytes([0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00])
+    extra += b"\xff\xff"
+    extra += struct.pack("<I", 1000 if hd else 0)
     extra += struct.pack("<H", width)
     extra += struct.pack("<H", height)
-    extra += struct.pack("<H", 320)
-    extra += struct.pack("<H", 240)
+    sec_w, sec_h = (width, height) if hd else (320, 240)
+    extra += struct.pack("<H", sec_w)
+    extra += struct.pack("<H", sec_h)
     extra += struct.pack("<H", fps)
     extra += bytes([0x00, 0x00])
     return _build_ctpp_video_msg(

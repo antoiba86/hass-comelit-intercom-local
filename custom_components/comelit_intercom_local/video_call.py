@@ -73,6 +73,7 @@ class VideoCallSession:
         rtsp_server: LocalRtspServer | None = None,
         on_call_end: Callable[[], None] | None = None,
         on_timeout: Callable[[], None] | None = None,
+        hd: bool = False,
     ) -> None:
         self._client = client
         self._config = config
@@ -80,6 +81,7 @@ class VideoCallSession:
         self._external_rtsp = rtsp_server is not None
         self._on_call_end = on_call_end
         self._on_timeout = on_timeout
+        self._hd = hd
         self._rtp_receiver: RtpReceiver | None = None
         self._rtsp_server: LocalRtspServer | None = rtsp_server
         self._timeout_task: asyncio.Task | None = None
@@ -388,7 +390,7 @@ class VideoCallSession:
             # PCAP: call_counter +0x00010000 (byte[4] +1) for video config DATA message.
             call_counter += _CTR_INCR_BYTE4
             vid_config = encode_video_config(
-                our_addr, entrance_addr, media_req_id, call_counter
+                our_addr, entrance_addr, media_req_id, call_counter, hd=self._hd
             )
             await client.send_binary(ctpp, vid_config)
             _LOGGER.debug(
@@ -741,7 +743,9 @@ class VideoCallSession:
         call_counter += _CTR_INCR_BYTE4
         await client.send_binary(
             ctpp,
-            encode_video_config(our_addr, entrance_addr, media_req_id, call_counter),
+            encode_video_config(
+                our_addr, entrance_addr, media_req_id, call_counter, hd=self._hd
+            ),
         )
 
         # 6. Wait for device RTPC and ACK its link

@@ -18,7 +18,7 @@ from .auth import authenticate
 from .channels import ChannelType
 from .client import IconaBridgeClient
 from .config_reader import get_device_config
-from .const import CONF_ENABLE_NOTIFICATIONS, DOMAIN
+from .const import CONF_ENABLE_NOTIFICATIONS, CONF_HD_VIDEO, DEFAULT_HD_VIDEO, DOMAIN
 from .ctpp import ctpp_init_sequence
 from .door import open_door
 from .models import DeviceConfig, Door, PushEvent
@@ -393,6 +393,9 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
 
             t0 = time.monotonic()
             _LOGGER.info("Video session starting (CTPP setup)")
+            hd_video = self.config_entry.options.get(
+                CONF_HD_VIDEO, DEFAULT_HD_VIDEO
+            )
             session = VideoCallSession(
                 self._client,
                 self._config,
@@ -400,6 +403,7 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
                 rtsp_server=self._rtsp_server,
                 on_call_end=self._on_video_call_end,
                 on_timeout=self._on_video_call_end,
+                hd=hd_video,
             )
             # Publish the session ONLY after start() has completed its
             # readiness gate (first real NAL queued).  Publishing earlier
