@@ -825,7 +825,8 @@ class VideoCallSession:
         _LOGGER.info("Answer peer/accept (0x70) sent — audio should start within ~400ms")
 
     async def async_open_door_on_ctpp(
-        self, our_addr: str, entrance_addr: str, relay_index: int
+        self, our_addr: str, entrance_addr: str, relay_index: int,
+        apt_addr: str | None = None,
     ) -> None:
         """Open a door by sending 0x1840/0x000D on the active video CTPP channel.
 
@@ -839,7 +840,8 @@ class VideoCallSession:
         async with self._ctpp_lock:
             self._call_counter += _CTR_INCR_BYTE4
             payload = encode_door_open_during_video(
-                our_addr, entrance_addr, self._call_counter, relay_index
+                our_addr, entrance_addr, self._call_counter, relay_index,
+                apt_addr=apt_addr,
             )
             await self._client.send_binary(ctpp, payload)
         _LOGGER.info(

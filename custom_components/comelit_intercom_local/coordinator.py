@@ -323,7 +323,8 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
             our_addr = f"{self._config.apt_address}{self._config.apt_subaddress}"
             entrance_addr = self._config.caller_address or our_addr
             await self._video_session.async_open_door_on_ctpp(
-                our_addr, entrance_addr, door.output_index
+                our_addr, entrance_addr, door.output_index,
+                apt_addr=self._config.apt_address,
             )
         else:
             await open_door(self._client, self._config, door)
