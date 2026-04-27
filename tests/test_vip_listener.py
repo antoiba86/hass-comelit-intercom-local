@@ -25,6 +25,7 @@ from custom_components.comelit_intercom_local.vip_listener import (
     PREFIX_VIDEO_EVENT,
     PREFIX_VIP_EVENT,
     VipEventListener,
+    _derive_event_ack_ts,
     parse_ctpp_message,
 )
 
@@ -355,9 +356,10 @@ class TestProcessMessage:
         cb = MagicMock()
         listener = _make_listener(cb)
 
+        # Real door open: caller is an entrance address, NOT the apartment
         data = _make_ctpp_msg(
             PREFIX_VIP_EVENT, 0x12345678, ACTION_DOOR_OPENED, flags=0,
-            addresses=["SB000006"]
+            addresses=["SB100001", "SB0000061"],
         )
         await listener._process_message(data)
 
@@ -367,6 +369,29 @@ class TestProcessMessage:
         # No ACK is sent — door_opened does not require one; the device
         # retransmits briefly and stops on its own, and any ACK we send
         # for this event gets rejected.
+        listener._client.send_binary.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_door_opened_apartment_internal_does_not_fire(self):
+        """0x1860/0x0003 with apt_address as caller is an FSM transition
+        after a missed/abandoned ring, not a real door open.
+
+        Real door opens carry an entrance address (e.g. SB100001) as caller.
+        Apartment-internal transitions carry the apartment's own bare
+        address (e.g. SB000006). Without this filter, missed doorbells
+        would falsely fire door_opened ~10s after the ring.
+        """
+        cb = MagicMock()
+        listener = _make_listener(cb, apt_address="SB000006")
+
+        # Apartment-internal: caller is the apartment's bare address
+        data = _make_ctpp_msg(
+            PREFIX_VIP_EVENT, 0x12345678, ACTION_DOOR_OPENED, flags=0,
+            addresses=["SB000006", "SB0000061"],
+        )
+        await listener._process_message(data)
+
+        cb.assert_not_called()
         listener._client.send_binary.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -491,3 +516,31 @@ class TestListenLoop:
 
         cb.assert_called_once()
         assert cb.call_args[0][0].event_type == "doorbell_ring"
+
+
+# ---------------------------------------------------------------------------
+# Event ACK timestamp derivation
+# ---------------------------------------------------------------------------
+
+
+class TestDeriveEventAckTs:
+    """Pinned dev-event → phone-ACK pairs from a clean wire trace."""
+
+    @pytest.mark.parametrize(
+        "dev_bytes, ack_bytes",
+        [
+            (b"\x64\x00\xd8\x6a", b"\xe4\x00\x6a\xd9"),  # call-init 0x18C0/0x0029
+            (b"\xd6\xb9\xd1\xf1", b"\x56\xb9\xf1\xd2"),  # renewal 0x1860/0x0010
+            (b"\x64\x00\xd9\x6a", b"\xe4\x00\x6a\xda"),  # video event 0x1840/0x0008
+            (b"\x64\x00\xd9\x6b", b"\xe4\x00\x6b\xda"),  # device ACK
+        ],
+    )
+    def test_pinned_pairs(self, dev_bytes, ack_bytes):
+        dev_ts = int.from_bytes(dev_bytes, "little")
+        expected = int.from_bytes(ack_bytes, "little")
+        assert _derive_event_ack_ts(dev_ts) == expected
+
+    def test_byte2_plus_1_wraps_at_ff(self):
+        dev_ts = int.from_bytes(b"\x00\x00\xff\x00", "little")
+        ack = _derive_event_ack_ts(dev_ts)
+        assert ack.to_bytes(4, "little") == b"\x80\x00\x00\x00"

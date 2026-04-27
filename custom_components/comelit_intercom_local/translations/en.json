@@ -11,10 +11,12 @@
       "init": {
         "title": "Comelit Intercom Options",
         "data": {
-          "enable_notifications": "Enable doorbell notifications"
+          "enable_notifications": "Enable doorbell notifications",
+          "verbose_logging": "Verbose logging"
         },
         "data_description": {
-          "enable_notifications": "Receive doorbell ring and missed call events from the intercom"
+          "enable_notifications": "Receive doorbell ring and missed call events from the intercom",
+          "verbose_logging": "Log every TCP packet, RTP frame, and RTSP frame at DEBUG. Off by default — enable only when troubleshooting."
         }
       }
     }

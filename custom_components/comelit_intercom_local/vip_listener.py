@@ -53,6 +53,21 @@ ACTION_REGISTRATION_RENEWAL = 0x0010  # Device keepalive — must ACK with 0x180
 MIN_MSG_SIZE = 8
 
 
+def _derive_event_ack_ts(dev_ts: int) -> int:
+    """Derive the ACK timestamp for a device-initiated VIP event.
+
+    Treating the 4-byte little-endian timestamp as raw bytes:
+        ack[0] = dev[0] ^ 0x80   (direction bit)
+        ack[1] = dev[1]
+        ack[2] = dev[3]          (echo dev's view of phone seq)
+        ack[3] = dev[2] + 1      (next expected dev seq, mod 256)
+    """
+    b = bytearray(dev_ts.to_bytes(4, "little"))
+    b[0] ^= 0x80
+    b[2], b[3] = b[3], (b[2] + 1) & 0xFF
+    return int.from_bytes(b, "little")
+
+
 def parse_ctpp_message(data: bytes) -> dict | None:
     """Parse a binary CTPP message into its components.
 
@@ -214,13 +229,17 @@ class VipEventListener:
         _is_real_vip = prefix == PREFIX_CALL_INIT or (
             prefix == PREFIX_VIP_EVENT and action not in (0x0000, ACTION_CALL_TERMINATED)
         )
-        # 0x1840 retransmits after video stops are expected — we don't ACK them
-        # (no valid counter) so the device retransmits briefly then stops on its own.
-        _is_video_tail = prefix == PREFIX_VIDEO_EVENT
+        # Retransmits we expect and don't warn about:
+        # - 0x1840 video tail (no valid counter to ACK after video stops)
+        # - 0x1860/0x0003 (intentionally not ACK'd; see ACK branch below)
+        _is_expected_retransmit = (
+            prefix == PREFIX_VIDEO_EVENT
+            or (prefix == PREFIX_VIP_EVENT and action == ACTION_DOOR_OPENED)
+        )
         if is_retransmit:
-            if _is_video_tail:
+            if _is_expected_retransmit:
                 _LOGGER.debug(
-                    "VIP: expected video-tail retransmit ignored "
+                    "VIP: expected retransmit ignored "
                     "(prefix=0x%04X action=0x%04X ts=0x%08X)",
                     prefix, action, ts,
                 )
@@ -291,24 +310,25 @@ class VipEventListener:
     async def _send_event_ack(self, msg: dict) -> None:
         """Send a single ACK (0x1800) for a device-initiated VIP event.
 
-        Used for events like door_opened (0x1860/0x0003) where the device
-        expects acknowledgment to clear the channel state. Without it the
-        device stays "busy" for a few seconds, blocking subsequent rings.
+        Without this ACK the device retransmits the event and its CTPP
+        state stays in "alerting", blocking subsequent door opens.
 
-        Timestamp is `init_ts + 0x01010000` — see __init__ docstring.
+        ACK timestamp is derived from the device's event timestamp via
+        `_derive_event_ack_ts`. Target address is `apt_address`; caller
+        is `apt_address + apt_subaddress`.
         """
         apt_addr = self._config.apt_address
         apt_sub = self._config.apt_subaddress
         vip_address = f"{apt_addr}{apt_sub}"
-        entrance_addr = msg["addresses"][0] if msg["addresses"] else apt_addr
+        ack_ts = _derive_event_ack_ts(msg["timestamp"])
         try:
             await self._client.send_binary(
                 self._channel,
-                encode_call_response_ack(vip_address, entrance_addr, self._ack_ts),
+                encode_call_response_ack(vip_address, apt_addr, ack_ts),
             )
             _LOGGER.debug(
-                "VIP: sent event ACK (action=0x%04X, ts=0x%08X)",
-                msg["action"], self._ack_ts,
+                "VIP: sent event ACK (action=0x%04X, dev_ts=0x%08X, ack_ts=0x%08X)",
+                msg["action"], msg["timestamp"], ack_ts,
             )
         except Exception:
             _LOGGER.warning("VIP: failed to send event ACK", exc_info=True)
@@ -372,8 +392,21 @@ class VipEventListener:
                 # CONNECTED: call was answered
                 pass
             elif action == ACTION_DOOR_OPENED:
-                # OUT_INITIATED / door opened (confirmed by testing)
-                self._fire_event("door_opened", addresses)
+                # 0x1860/0x0003 fires in two distinct cases:
+                # - Real door open: caller (addresses[0]) is an entrance
+                #   address (e.g. SB100001), echoing which entrance opened
+                # - Apartment-side FSM transition after a missed/abandoned
+                #   ring: caller is the apartment's own bare address (e.g.
+                #   SB000006), no entrance involved
+                # Only fire door_opened in the first case.
+                caller = addresses[0] if addresses else ""
+                if caller and caller == self._config.apt_address:
+                    _LOGGER.debug(
+                        "VIP FSM 0x0003 ignored (apartment-internal, addrs=%s)",
+                        addresses,
+                    )
+                else:
+                    self._fire_event("door_opened", addresses)
             elif action == ACTION_OUT_ALERTING:
                 # OUT_ALERTING: outgoing call is ringing
                 pass
