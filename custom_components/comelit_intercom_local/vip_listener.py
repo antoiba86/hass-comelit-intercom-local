@@ -143,6 +143,12 @@ class VipEventListener:
         # previous ACK was not accepted.
         self._last_seen_ts: dict[tuple[int, int], tuple[int, float]] = {}
         self._retransmit_window: float = 10.0  # seconds
+        # Counts (prefix, action) pairs that reached no handler — useful for
+        # detecting firmware changes or unimplemented event types.
+        self.decode_misses: dict[tuple[int, int], int] = {}
+        # Number of times the listener loop has restarted after an unhandled
+        # exception — surface this for diagnostics.
+        self.restart_count: int = 0
 
     async def start(self) -> None:
         """Attach to the existing CTPP channel and start the listener task.
@@ -182,17 +188,43 @@ class VipEventListener:
         await self.stop_task()
 
     async def _listen_loop(self) -> None:
-        """Read binary messages from the CTPP channel and dispatch events."""
-        queue = self._channel.response_queue
+        """Read binary messages from the CTPP channel and dispatch events.
+
+        Supervisor: auto-restarts after unhandled exceptions, up to 5 times
+        in 60 seconds, then re-raises so the coordinator can reconnect.
+        """
+        _RESTART_LIMIT = 5
+        _RESTART_WINDOW = 60.0
+        restart_times: list[float] = []
+
         while self._running:
             try:
-                data = await asyncio.wait_for(queue.get(), timeout=60.0)
-            except TimeoutError:
-                continue
+                queue = self._channel.response_queue
+                while self._running:
+                    try:
+                        data = await asyncio.wait_for(queue.get(), timeout=60.0)
+                    except TimeoutError:
+                        continue
+                    await self._process_message(data)
             except asyncio.CancelledError:
-                break
-
-            await self._process_message(data)
+                raise
+            except Exception:
+                now = time.time()
+                restart_times = [t for t in restart_times if now - t < _RESTART_WINDOW]
+                restart_times.append(now)
+                self.restart_count += 1
+                _LOGGER.error(
+                    "VIP listener loop crashed (restart #%d, %d in %.0fs window)",
+                    self.restart_count, len(restart_times), _RESTART_WINDOW,
+                    exc_info=True,
+                )
+                if len(restart_times) > _RESTART_LIMIT:
+                    _LOGGER.error(
+                        "VIP listener exceeded %d restarts in %ds — escalating to coordinator",
+                        _RESTART_LIMIT, int(_RESTART_WINDOW),
+                    )
+                    raise
+                await asyncio.sleep(1)
 
     async def _process_message(self, data: bytes) -> None:
         """Parse and dispatch a binary CTPP message."""
@@ -417,18 +449,21 @@ class VipEventListener:
                 # IDLE: device returned to idle state
                 pass
             else:
-                _LOGGER.debug(
-                    "VIP FSM event ignored (unknown action=0x%04X)", action
+                key = (prefix, action)
+                self.decode_misses[key] = self.decode_misses.get(key, 0) + 1
+                _LOGGER.info(
+                    "VIP FSM event ignored (unknown action=0x%04X, miss_count=%d)",
+                    action, self.decode_misses[key],
                 )
             return
 
         # 0x1840 events are call-related but may be codec negotiation, config
         # acks, etc. Only log them for now — don't fire events.
-        _LOGGER.debug(
-            "VIP event (not doorbell): prefix=0x%04X action=0x%04X addrs=%s",
-            prefix,
-            action,
-            addresses,
+        key = (prefix, action)
+        self.decode_misses[key] = self.decode_misses.get(key, 0) + 1
+        _LOGGER.info(
+            "VIP event (not doorbell): prefix=0x%04X action=0x%04X addrs=%s (miss_count=%d)",
+            prefix, action, addresses, self.decode_misses[key],
         )
 
     def _fire_event(self, event_type: str, addresses: list[str]) -> None:

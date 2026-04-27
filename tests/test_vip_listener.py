@@ -519,6 +519,128 @@ class TestListenLoop:
 
 
 # ---------------------------------------------------------------------------
+# VipEventListener.decode_misses — Phase 1a observability
+# ---------------------------------------------------------------------------
+
+
+class TestDecodeMisses:
+    @pytest.mark.asyncio
+    async def test_unknown_vip_action_increments_decode_miss(self):
+        """Unknown action code in VIP event increments decode_misses counter."""
+        listener = _make_listener()
+
+        data = _make_ctpp_msg(PREFIX_VIP_EVENT, 0x12345678, 0xFFFF, flags=0)
+        await listener._process_message(data)
+
+        assert listener.decode_misses.get((PREFIX_VIP_EVENT, 0xFFFF), 0) == 1
+
+    @pytest.mark.asyncio
+    async def test_video_event_increments_decode_miss(self):
+        """0x1840 events (call-related internals) are counted as decode misses."""
+        listener = _make_listener()
+
+        data = _make_ctpp_msg(PREFIX_VIDEO_EVENT, 0, 0x0099, flags=0)
+        await listener._process_message(data)
+
+        assert listener.decode_misses.get((PREFIX_VIDEO_EVENT, 0x0099), 0) == 1
+
+    @pytest.mark.asyncio
+    async def test_decode_miss_counter_accumulates(self):
+        """Repeated unknown events accumulate in the counter."""
+        listener = _make_listener()
+
+        data = _make_ctpp_msg(PREFIX_VIP_EVENT, 0, 0xAAAA, flags=0)
+        await listener._process_message(data)
+        await listener._process_message(data)
+
+        assert listener.decode_misses.get((PREFIX_VIP_EVENT, 0xAAAA), 0) == 2
+
+    @pytest.mark.asyncio
+    async def test_known_events_do_not_increment_decode_miss(self):
+        """Known handled events (doorbell ring, door opened) don't count as misses."""
+        cb = MagicMock()
+        listener = _make_listener(cb)
+
+        data = _make_ctpp_msg(PREFIX_CALL_INIT, 0xABCD, 0, flags=0)
+        await listener._process_message(data)
+
+        assert not listener.decode_misses
+
+
+# ---------------------------------------------------------------------------
+# VipEventListener._listen_loop supervisor — Phase 1b
+# ---------------------------------------------------------------------------
+
+
+class TestListenLoopSupervisor:
+    @pytest.mark.asyncio
+    async def test_restarts_after_single_exception(self):
+        """One-shot exception in the read loop restarts it and increments restart_count."""
+        cb = MagicMock()
+        listener = _make_listener(cb)
+        listener._running = True
+        call_count = 0
+
+        async def failing_process(data):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise RuntimeError("transient")
+            listener._running = False
+
+        listener._process_message = failing_process
+
+        data = _make_ctpp_msg(PREFIX_VIP_EVENT, 0, ACTION_IN_ALERTING, flags=0)
+        await listener._channel.response_queue.put(data)
+        await listener._channel.response_queue.put(data)
+
+        async def mock_sleep(t):
+            pass  # no-op, but _running=False set in failing_process on next call
+
+        with patch("asyncio.sleep", side_effect=mock_sleep):
+            await listener._listen_loop()
+
+        assert listener.restart_count == 1
+
+    @pytest.mark.asyncio
+    async def test_escalates_after_too_many_restarts(self):
+        """More than 5 restarts in 60 s re-raises so the coordinator can reconnect."""
+        listener = _make_listener()
+        listener._running = True
+
+        async def always_fail(data):
+            raise RuntimeError("persistent")
+
+        listener._process_message = always_fail
+
+        data = _make_ctpp_msg(PREFIX_VIP_EVENT, 0, 0, flags=0)
+        for _ in range(10):
+            await listener._channel.response_queue.put(data)
+
+        with patch("asyncio.sleep", new_callable=AsyncMock):
+            with pytest.raises(RuntimeError, match="persistent"):
+                await listener._listen_loop()
+
+        assert listener.restart_count > 5
+
+    @pytest.mark.asyncio
+    async def test_cancelled_error_propagates_without_restart(self):
+        """CancelledError is not treated as a loop crash — it propagates directly."""
+        listener = _make_listener()
+        listener._running = True
+
+        async def cancel_on_get():
+            raise asyncio.CancelledError()
+
+        listener._channel.response_queue.get = cancel_on_get
+
+        with pytest.raises(asyncio.CancelledError):
+            await listener._listen_loop()
+
+        assert listener.restart_count == 0
+
+
+# ---------------------------------------------------------------------------
 # Event ACK timestamp derivation
 # ---------------------------------------------------------------------------
 

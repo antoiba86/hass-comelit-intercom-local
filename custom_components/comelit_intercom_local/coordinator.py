@@ -212,7 +212,25 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
 
         client = IconaBridgeClient(self.host, self.port)
         try:
-            await client.connect()
+            # Brief retry loop for ECONNREFUSED: the device's listen socket
+            # occasionally needs a moment to accept after sending a FIN.
+            # Observed in the wild: FIN → reconnect 64 ms later → ECONNREFUSED.
+            # Without retries this extends the deaf window from ~400 ms to ~30 s.
+            _CONNECT_MAX_ATTEMPTS = 4
+            _CONNECT_BACKOFFS = (0.25, 0.40, 0.50)
+            for attempt in range(_CONNECT_MAX_ATTEMPTS):
+                try:
+                    await client.connect()
+                    break
+                except (ConnectionRefusedError, ConnectionResetError, OSError) as exc:
+                    if attempt == _CONNECT_MAX_ATTEMPTS - 1:
+                        raise
+                    backoff = _CONNECT_BACKOFFS[attempt]
+                    _LOGGER.debug(
+                        "Connect attempt %d/%d failed (%s) — retrying in %.2fs",
+                        attempt + 1, _CONNECT_MAX_ATTEMPTS, exc, backoff,
+                    )
+                    await asyncio.sleep(backoff)
             await authenticate(client, self.token)
             self._config = await get_device_config(client)
             await register_push(client, self._config, self._on_push_event)
@@ -552,19 +570,23 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
             except Exception:
                 _LOGGER.exception("Error in stop-video callback")
 
-        await session.stop(reason="user stopped")
-        # Block future PLAYs until the next session is ready, and
-        # kick any remaining RTSP clients (e.g. go2rtc) so they
-        # reconnect fresh against a stream that already has video.
-        if self._rtsp_server:
-            self._rtsp_server.mark_not_ready()
-            self._rtsp_server.disconnect_clients()
-        # Restart VIP listener now that video released the CTPP slot.
-        # Skip if we're inside async_start_video (lock already held) —
-        # start_video will stop VIP again immediately anyway.
-        if not self._video_start_lock.locked():
-            await self._ensure_vip_listener()
-        await self._notify_video_state_change()
+        try:
+            await session.stop(reason="user stopped")
+        finally:
+            # Block future PLAYs until the next session is ready, and
+            # kick any remaining RTSP clients (e.g. go2rtc) so they
+            # reconnect fresh against a stream that already has video.
+            if self._rtsp_server:
+                self._rtsp_server.mark_not_ready()
+                self._rtsp_server.disconnect_clients()
+            # Restart VIP listener now that video released the CTPP slot.
+            # Finally-guarded so teardown exceptions don't leave the listener
+            # permanently paused — it would stay deaf until coordinator reconnect.
+            # Skip if we're inside async_start_video (lock already held) —
+            # start_video will stop VIP again immediately anyway.
+            if not self._video_start_lock.locked():
+                await self._ensure_vip_listener()
+            await self._notify_video_state_change()
 
     @property
     def video_session(self) -> VideoCallSession | None:
