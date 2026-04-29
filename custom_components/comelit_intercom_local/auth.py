@@ -10,7 +10,6 @@ from .exceptions import AuthenticationError
 
 _LOGGER = logging.getLogger(__name__)
 
-
 async def authenticate(client: IconaBridgeClient, token: str) -> None:
     """Authenticate with the device using a user token.
 

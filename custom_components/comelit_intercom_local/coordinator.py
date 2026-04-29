@@ -345,7 +345,7 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
                 apt_addr=self._config.apt_address,
             )
         else:
-            await open_door(self._client, self._config, door)
+            await open_door(self.host, self.port, self.token, self._client, self._config, door)
 
     async def async_start_video(
         self, auto_timeout: bool = True, by_user: bool = False
