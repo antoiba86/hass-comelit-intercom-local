@@ -212,25 +212,7 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
 
         client = IconaBridgeClient(self.host, self.port)
         try:
-            # Brief retry loop for ECONNREFUSED: the device's listen socket
-            # occasionally needs a moment to accept after sending a FIN.
-            # Observed in the wild: FIN → reconnect 64 ms later → ECONNREFUSED.
-            # Without retries this extends the deaf window from ~400 ms to ~30 s.
-            _CONNECT_MAX_ATTEMPTS = 4
-            _CONNECT_BACKOFFS = (0.25, 0.40, 0.50)
-            for attempt in range(_CONNECT_MAX_ATTEMPTS):
-                try:
-                    await client.connect()
-                    break
-                except (ConnectionRefusedError, ConnectionResetError, OSError) as exc:
-                    if attempt == _CONNECT_MAX_ATTEMPTS - 1:
-                        raise
-                    backoff = _CONNECT_BACKOFFS[attempt]
-                    _LOGGER.debug(
-                        "Connect attempt %d/%d failed (%s) — retrying in %.2fs",
-                        attempt + 1, _CONNECT_MAX_ATTEMPTS, exc, backoff,
-                    )
-                    await asyncio.sleep(backoff)
+            await client.connect()
             await authenticate(client, self.token)
             self._config = await get_device_config(client)
             await register_push(client, self._config, self._on_push_event)
