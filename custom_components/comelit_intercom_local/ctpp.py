@@ -30,7 +30,7 @@ async def ctpp_init_sequence(
     apt_addr: str,
     apt_sub: int,
     our_addr: str,
-    timestamp: int,
+    timestamp: int | None = None,
     response_timeout: float = 5.0,
     send_ack: bool = True,
 ) -> None:
@@ -50,8 +50,8 @@ async def ctpp_init_sequence(
         response_timeout: seconds to wait for each device response.
         send_ack: send the ACK pair after draining responses (default True).
     """
-    await client.send_binary(channel, encode_ctpp_init(apt_addr, apt_sub, timestamp))
-    _LOGGER.debug("CTPP init sent (ts=0x%08X)", timestamp)
+    init_payload = encode_ctpp_init(apt_addr, apt_sub, timestamp)
+    await client.send_binary(channel, init_payload)
 
     await read_response_ctpp(client, channel, response_timeout)
 

@@ -351,7 +351,7 @@ class TestAsyncOpenDoor:
 
     @pytest.mark.asyncio
     async def test_uses_open_door_when_no_video_session(self):
-        """async_open_door delegates to open_door when no video session is active."""
+        """async_open_door delegates to open_door with host/port/token/client/config/door."""
         coord = _make_coordinator(with_client=True)
         door = MagicMock()
 
@@ -361,7 +361,9 @@ class TestAsyncOpenDoor:
         ) as mock_open_door:
             await coord.async_open_door(door)
 
-        mock_open_door.assert_awaited_once()
+        mock_open_door.assert_awaited_once_with(
+            coord.host, coord.port, coord.token, coord._client, coord._config, door
+        )
 
     @pytest.mark.asyncio
     async def test_raises_when_not_connected(self):
