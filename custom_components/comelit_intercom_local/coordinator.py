@@ -118,9 +118,9 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
         """
         our_addr = f"{config.apt_address}{config.apt_subaddress}"
         ctpp = await client.open_channel(
-            "CTPP", ChannelType.UAUT, extra_data=our_addr
+            "CTPP", ChannelType.CTPP, extra_data=our_addr
         )
-        await client.open_channel("CSPB", ChannelType.UAUT)
+        await client.open_channel("CSPB", ChannelType.CSPB)
         ts = int(time.time()) & 0xFFFFFFFF
         await ctpp_init_sequence(
             client, ctpp,
