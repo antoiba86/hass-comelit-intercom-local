@@ -15,7 +15,7 @@ from .models import PushEvent
 
 _LOGGER = logging.getLogger(__name__)
 
-EVENT_TYPES = ["doorbell_ring", "missed_call"]
+EVENT_TYPES = ["doorbell_ring", "missed_call", "door_opened"]
 
 
 async def async_setup_entry(
