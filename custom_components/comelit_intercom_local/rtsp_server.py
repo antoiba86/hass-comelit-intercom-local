@@ -88,8 +88,9 @@ class LocalRtspServer:
         await server.stop()
     """
 
-    def __init__(self, bind_host: str = "127.0.0.1") -> None:
+    def __init__(self, bind_host: str = "127.0.0.1", port: int = 8557) -> None:
         self._bind_host = bind_host
+        self._bind_port = port
         self._rtsp_port: int = 0
         self._server: asyncio.Server | None = None
 
@@ -193,7 +194,7 @@ class LocalRtspServer:
         self._server = await asyncio.start_server(
             self._handle_client,
             self._bind_host,
-            0,
+            self._bind_port,
         )
         self._rtsp_port = self._server.sockets[0].getsockname()[1]
         self._running = True
