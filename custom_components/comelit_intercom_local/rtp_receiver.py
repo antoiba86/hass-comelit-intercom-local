@@ -9,6 +9,7 @@ import logging
 import struct
 import time
 
+from .const import is_verbose_logging
 from .protocol import HEADER_SIZE, ICONA_BRIDGE_PORT
 
 _LOGGER = logging.getLogger(__name__)
@@ -38,7 +39,8 @@ class _UdpProtocol(asyncio.DatagramProtocol):
         self._receiver = receiver
 
     def connection_made(self, transport) -> None:
-        _LOGGER.debug("UDP socket connected: %s", transport.get_extra_info("sockname"))
+        if is_verbose_logging():
+            _LOGGER.debug("UDP socket connected: %s", transport.get_extra_info("sockname"))
 
     def datagram_received(self, data: bytes, addr: tuple[str, int]) -> None:
         self._receiver._on_udp_packet(data)
@@ -48,7 +50,8 @@ class _UdpProtocol(asyncio.DatagramProtocol):
 
     def connection_lost(self, exc: Exception | None) -> None:
         if exc:
-            _LOGGER.debug("UDP connection lost: %s", exc)
+            if is_verbose_logging():
+                _LOGGER.debug("UDP connection lost: %s", exc)
 
 
 class RtpReceiver:
@@ -152,7 +155,8 @@ class RtpReceiver:
         self._rtsp_nal_queue = nal_queue
         self._rtsp_audio_queue = audio_queue
         self._rtsp_rtp_queue = rtp_queue
-        _LOGGER.debug("RTSP queues attached (rtp_passthrough=%s)", rtp_queue is not None)
+        if is_verbose_logging():
+            _LOGGER.debug("RTSP queues attached (rtp_passthrough=%s)", rtp_queue is not None)
 
     async def start_control(self) -> int:
         """Open UDP socket and send 2 discovery packets.
@@ -173,23 +177,26 @@ class RtpReceiver:
 
         self._send_control()
         self._send_control()
-        _LOGGER.debug(
-            "UDP socket ready: local port %d -> %s:%d "
-            "(control=0x%04X, token=0x%04X)",
-            actual_port, self._host, self._port,
-            self._control_req_id, self._udpm_token,
-        )
+        if is_verbose_logging():
+            _LOGGER.debug(
+                "UDP socket ready: local port %d -> %s:%d "
+                "(control=0x%04X, token=0x%04X)",
+                actual_port, self._host, self._port,
+                self._control_req_id, self._udpm_token,
+            )
         return actual_port
 
     def start_keepalive(self) -> None:
         """Start the continuous keepalive loop (call after video config sent)."""
         self._keepalive_task = asyncio.create_task(self._keepalive_loop())
-        _LOGGER.debug("UDP keepalive loop started")
+        if is_verbose_logging():
+            _LOGGER.debug("UDP keepalive loop started")
 
     def set_media_req_id(self, media_req_id: int) -> None:
         """Set the media request ID once RTPC2 is opened."""
         self._media_req_id = media_req_id
-        _LOGGER.debug("Media req_id set to 0x%04X", media_req_id)
+        if is_verbose_logging():
+            _LOGGER.debug("Media req_id set to 0x%04X", media_req_id)
 
     async def start_media(self) -> None:
         """Start the decode task for processing H.264 NAL units.
@@ -198,7 +205,8 @@ class RtpReceiver:
         sending video data.
         """
         self._decode_task = asyncio.create_task(self._decode_loop())
-        _LOGGER.debug("H.264 decode task started")
+        if is_verbose_logging():
+            _LOGGER.debug("H.264 decode task started")
 
     async def start(self) -> int:
         """Start full receiver (control + media). Legacy one-step API."""
@@ -214,7 +222,8 @@ class RtpReceiver:
             self._control_req_id, self._udpm_token, self._control_seq
         )
         self._transport.sendto(pkt)
-        _LOGGER.debug("Sent UDP control packet seq=%d", self._control_seq)
+        if is_verbose_logging():
+            _LOGGER.debug("Sent UDP control packet seq=%d", self._control_seq)
         self._control_seq += 1
 
     async def _keepalive_loop(self) -> None:
@@ -241,9 +250,10 @@ class RtpReceiver:
         self._media_packet_count += 1
         self._tcp_media_packet_count += 1
         if self._tcp_media_packet_count == 1:
-            _LOGGER.info(
-                "Media transport = TCP (RTPC2): first packet %d bytes", len(data)
-            )
+            if is_verbose_logging():
+                _LOGGER.info(
+                    "Media transport = TCP (RTPC2): first packet %d bytes", len(data)
+                )
         self._process_rtp(data)
 
     def _on_udp_packet(self, data: bytes) -> None:
@@ -261,17 +271,19 @@ class RtpReceiver:
             self._media_packet_count += 1
             self._udp_media_packet_count += 1
             if self._udp_media_packet_count == 1:
-                _LOGGER.info(
-                    "Media transport = UDP: first packet %d bytes RTP",
-                    len(raw_rtp),
-                )
+                if is_verbose_logging():
+                    _LOGGER.info(
+                        "Media transport = UDP: first packet %d bytes RTP",
+                        len(raw_rtp),
+                    )
 
             # Parse RTP header and extract NAL units
             if len(raw_rtp) >= 13:
                 self._process_rtp(raw_rtp)
 
         elif req_id == self._control_req_id:
-            _LOGGER.debug("Received UDP control response (%d bytes)", len(data))
+            if is_verbose_logging():
+                _LOGGER.debug("Received UDP control response (%d bytes)", len(data))
 
     def _process_rtp(self, rtp: bytes) -> None:
         """Parse RTP packet — route to audio or H.264 pipeline by payload type."""
@@ -355,7 +367,7 @@ class RtpReceiver:
         if not audio_payload:
             return
         self._audio_packet_count += 1
-        if _LOGGER.isEnabledFor(logging.DEBUG) and self._audio_packet_count <= 3:
+        if is_verbose_logging() and self._audio_packet_count <= 3:
             _LOGGER.debug(
                 "Audio RTP: PT=%d (%s), %d bytes payload",
                 payload_type,
@@ -382,10 +394,11 @@ class RtpReceiver:
             now - self._last_idr_mono if self._last_idr_mono is not None else 0.0
         )
         self._last_idr_mono = now
-        _LOGGER.debug(
-            "IDR #%d rtp_ts=0x%08X interval=%.2fs",
-            self._idr_count, rtp_ts, interval,
-        )
+        if is_verbose_logging():
+            _LOGGER.debug(
+                "IDR #%d rtp_ts=0x%08X interval=%.2fs",
+                self._idr_count, rtp_ts, interval,
+            )
 
     def _queue_nal(self, rtp_ts: int, nal_bytes: bytes) -> None:
         """Queue a complete NAL unit for decoding and optional RTSP fanout.
@@ -479,7 +492,7 @@ class RtpReceiver:
         frame_count = 0
         consecutive_errors = 0
 
-        verbose = _LOGGER.isEnabledFor(logging.DEBUG)
+        verbose = is_verbose_logging()
 
         def _decode_buffer_sync(buf: bytes) -> list[tuple[int, int, bytes]]:
             """Parse + decode + JPEG-encode a buffer. Runs in thread pool.
@@ -609,10 +622,11 @@ class RtpReceiver:
         self._protocol = None
 
         self._latest_frame = None
-        _LOGGER.debug(
-            "RTP receiver stopped (received %d media packets)",
-            self._media_packet_count,
-        )
+        if is_verbose_logging():
+            _LOGGER.debug(
+                "RTP receiver stopped (received %d media packets)",
+                self._media_packet_count,
+            )
 
     async def get_jpeg_frame(self, timeout: float = 5.0) -> bytes | None:
         """Wait for the next new JPEG frame and return it.

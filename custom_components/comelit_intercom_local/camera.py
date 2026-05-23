@@ -12,7 +12,7 @@ from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .camera_utils import get_rtsp_url
-from .const import DOMAIN, MANUFACTURER, MODEL
+from .const import DOMAIN, MANUFACTURER, MODEL, is_verbose_logging
 from .coordinator import ComelitLocalConfigEntry, ComelitLocalCoordinator
 from .models import Camera as CameraModel, PushEvent
 from .placeholder import PLACEHOLDER_JPEG
@@ -220,7 +220,8 @@ class ComelitIntercomCamera(Camera):
         try:
             await stream.stop()
         except Exception:
-            _LOGGER.debug("Error stopping HA stream", exc_info=True)
+            if is_verbose_logging():
+                _LOGGER.debug("Error stopping HA stream", exc_info=True)
 
     def _on_push(self, event: PushEvent) -> None:
         """Handle push events — no auto-start; user controls video via button or automation."""

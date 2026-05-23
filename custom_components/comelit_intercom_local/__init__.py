@@ -10,7 +10,7 @@ from homeassistant.const import CONF_HOST, CONF_PORT, CONF_TOKEN, MAJOR_VERSION,
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
 
-from .const import DEFAULT_PORT, DOMAIN
+from .const import CONF_VERBOSE_LOGGING, DEFAULT_PORT, DOMAIN, set_verbose_logging
 from .coordinator import ComelitLocalConfigEntry, ComelitLocalCoordinator
 from .exceptions import (
     AuthenticationError,
@@ -19,7 +19,7 @@ from .exceptions import (
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORMS = [Platform.BUTTON, Platform.CAMERA, Platform.EVENT]
+PLATFORMS = [Platform.BINARY_SENSOR, Platform.BUTTON, Platform.CAMERA, Platform.EVENT]
 
 _CARD_URL = "/comelit_intercom_local/comelit-intercom-card.js"
 _CARD_PATH = str(Path(__file__).parent / "www" / "comelit-intercom-card.js")
@@ -85,6 +85,12 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
         await _init_resource(hass, url, str(version))
         _LOGGER.info("Comelit card registered at %s", url)
     return True
+
+
+def _apply_log_levels(verbose: bool) -> None:
+    """Propagate the verbose_logging option to the component-wide flag."""
+    set_verbose_logging(verbose)
+
 
 
 async def async_setup_entry(

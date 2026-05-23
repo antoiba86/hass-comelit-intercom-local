@@ -96,6 +96,7 @@ _ha_const.CONF_PORT = "port"
 _ha_const.CONF_TOKEN = "token"
 _ha_const.CONF_PASSWORD = "password"
 _ha_const.Platform = MagicMock()
+_ha_const.Platform.BINARY_SENSOR = "binary_sensor"
 _ha_const.Platform.BUTTON = "button"
 _ha_const.Platform.CAMERA = "camera"
 _ha_const.Platform.EVENT = "event"
@@ -185,6 +186,14 @@ _ha_update_coordinator.CoordinatorEntity = _CoordinatorEntity
 _ha.core.callback = lambda fn: fn
 
 # Stub for homeassistant.components.event
+class _DoorbellEventType:
+    RING = "ring"
+
+
+class _EventDeviceClass:
+    DOORBELL = "doorbell"
+
+
 class _EventEntity:
     """Minimal stub for homeassistant.components.event.EventEntity."""
 
@@ -192,6 +201,7 @@ class _EventEntity:
     _attr_name = None
     _attr_unique_id = None
     _attr_icon = None
+    _attr_device_class = None
     _attr_event_types: list = []
     _attr_translation_key: str | None = None
 
@@ -211,6 +221,8 @@ class _EventEntity:
 
 _ha_event = MagicMock()
 _ha_event.EventEntity = _EventEntity
+_ha_event.DoorbellEventType = _DoorbellEventType
+_ha_event.EventDeviceClass = _EventDeviceClass
 
 sys.modules["homeassistant.components"] = MagicMock()
 sys.modules["homeassistant.components.button"] = _ha_button

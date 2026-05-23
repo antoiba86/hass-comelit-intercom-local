@@ -8,6 +8,7 @@ import time
 
 from .channels import ChannelType, ViperMessageId
 from .client import IconaBridgeClient
+from .const import is_verbose_logging
 from .models import DeviceConfig, PushEvent
 
 _LOGGER = logging.getLogger(__name__)
@@ -42,7 +43,8 @@ async def register_push(
     }
 
     response = await client.send_json(channel, msg)
-    _LOGGER.debug("Push registration response: %s", response)
+    if is_verbose_logging():
+        _LOGGER.debug("Push registration response: %s", response)
 
     def _on_push(raw_msg: dict) -> None:
         event = _parse_push_event(raw_msg)
@@ -50,7 +52,8 @@ async def register_push(
             callback(event)
 
     client.set_push_callback(_on_push)
-    _LOGGER.info("Push notifications registered")
+    if is_verbose_logging():
+        _LOGGER.info("Push notifications registered")
 
 
 async def send_push_keepalive(
@@ -81,7 +84,8 @@ async def send_push_keepalive(
         "message-type": "request",
     }
     await client.send_json(channel, msg)
-    _LOGGER.debug("Push keepalive sent")
+    if is_verbose_logging():
+        _LOGGER.debug("Push keepalive sent")
 
 
 def _parse_push_event(raw: dict) -> PushEvent | None:
@@ -95,7 +99,7 @@ def _parse_push_event(raw: dict) -> PushEvent | None:
     # Known event types from community reverse-engineering
     if msg_type in ("incoming-call", "push-incoming-call"):
         return PushEvent(
-            event_type="doorbell_ring",
+            event_type="ring",
             apt_address=raw.get("apt-address", ""),
             timestamp=time.time(),
             raw=raw,
