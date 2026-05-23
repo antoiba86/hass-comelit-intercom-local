@@ -7,7 +7,6 @@ import logging
 import time
 
 from homeassistant.components.button import ButtonEntity
-from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -40,7 +39,6 @@ async def async_setup_entry(
         entities.append(ComelitStartVideoButton(coordinator, entry.entry_id))
         entities.append(ComelitStopVideoButton(coordinator, entry.entry_id))
 
-    entities.append(ComelitRestartNotificationsButton(coordinator, entry.entry_id))
     async_add_entities(entities)
 
 
@@ -187,37 +185,3 @@ class ComelitStopVideoButton(CoordinatorEntity[ComelitLocalCoordinator], ButtonE
             await self.coordinator.async_stop_video()
         except Exception:
             _LOGGER.exception("Failed to stop intercom video")
-
-
-class ComelitRestartNotificationsButton(CoordinatorEntity[ComelitLocalCoordinator], ButtonEntity):
-    """Button entity to restart the VIP notification listener."""
-
-    _attr_has_entity_name = True
-    _attr_icon = "mdi:bell-sync"
-    _attr_name = "Restart Notifications"
-    _attr_entity_category = EntityCategory.DIAGNOSTIC
-
-    def __init__(self, coordinator: ComelitLocalCoordinator, entry_id: str) -> None:
-        super().__init__(coordinator)
-        self._entry_id = entry_id
-        self._attr_unique_id = f"{entry_id}_restart_notifications"
-
-    @property
-    def device_info(self) -> DeviceInfo:
-        return DeviceInfo(
-            identifiers={(DOMAIN, self._entry_id)},
-            manufacturer=MANUFACTURER,
-            model=MODEL,
-            name=self.coordinator.device_name,
-        )
-
-    @property
-    def available(self) -> bool:
-        return self.coordinator.notifications_enabled
-
-    async def async_press(self) -> None:
-        """Restart the notification listener."""
-        try:
-            await self.coordinator.async_restart_notifications()
-        except Exception:
-            _LOGGER.exception("Failed to restart notifications")

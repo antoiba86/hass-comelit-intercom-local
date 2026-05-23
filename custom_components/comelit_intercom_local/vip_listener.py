@@ -27,7 +27,7 @@ import time
 
 from .client import IconaBridgeClient
 from .const import is_verbose_logging
-from .ctpp import _VIP_ACK_TS_INCR
+from .ctpp import _CTR_INCR_BOTH
 from .models import DeviceConfig, PushEvent
 from .protocol import encode_call_response_ack
 
@@ -116,7 +116,7 @@ class VipEventListener:
         # (PCAP-verified: client never derives ACK ts from the device's
         # renewal ts — using device_ts causes the device to reject the ACK).
         self._init_ts = init_ts
-        self._ack_ts = (init_ts + _VIP_ACK_TS_INCR) & 0xFFFFFFFF
+        self._ack_ts = (init_ts + _CTR_INCR_BOTH) & 0xFFFFFFFF
         self._task: asyncio.Task | None = None
         self._running = False
         # Timestamp of the last fired event per type — used to deduplicate

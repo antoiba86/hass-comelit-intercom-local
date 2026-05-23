@@ -19,7 +19,7 @@ from .exceptions import (
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORMS = [Platform.BINARY_SENSOR, Platform.BUTTON, Platform.CAMERA, Platform.EVENT]
+PLATFORMS = [Platform.BUTTON, Platform.CAMERA, Platform.EVENT]
 
 _CARD_URL = "/comelit_intercom_local/comelit-intercom-card.js"
 _CARD_PATH = str(Path(__file__).parent / "www" / "comelit-intercom-card.js")
