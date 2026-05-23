@@ -418,7 +418,7 @@ class TestProcessMessage:
 
     @pytest.mark.asyncio
     async def test_renewal_ack_uses_init_ts_plus_ctr_incr(self):
-        """Renewal ACK timestamp must be init_ts + 0x01010000 — PCAP-verified.
+        """Renewal ACK timestamp must be init_ts + _VIP_ACK_TS_INCR (0x01000000) — PCAP-verified.
 
         The client derives outgoing ACK timestamps from its OWN init_ts, not
         from the device's renewal timestamp. Using the device ts causes the
@@ -443,7 +443,7 @@ class TestProcessMessage:
         await listener._process_message(data)
 
         assert len(sent_payloads) == 2
-        expected_ts = (init_ts + 0x01010000) & 0xFFFFFFFF
+        expected_ts = (init_ts + 0x01000000) & 0xFFFFFFFF
         for payload in sent_payloads:
             actual_ts = struct.unpack_from("<I", payload, 2)[0]
             assert actual_ts == expected_ts

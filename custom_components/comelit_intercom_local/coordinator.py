@@ -21,6 +21,7 @@ from .config_reader import get_device_config
 from .const import CONF_ENABLE_NOTIFICATIONS, DOMAIN
 from .ctpp import ctpp_init_sequence
 from .door import open_door
+from .exceptions import ConnectionComelitError
 from .models import DeviceConfig, Door, PushEvent
 from .push import register_push, send_push_keepalive
 from .rtsp_server import LocalRtspServer
@@ -89,6 +90,9 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
         # — without it, picture-entity locks to the transport it picked
         # at first stream_source() call and never upgrades from MJPEG.
         self._on_video_state_change: dict[Callable[[], Awaitable[None]], None] = {}
+        # Async callbacks invoked whenever the VIP event listener starts or stops.
+        # The notification binary sensor uses this to update its state.
+        self._on_vip_state_change: dict[Callable[[], Awaitable[None]], None] = {}
 
     @property
     def device_config(self) -> DeviceConfig | None:
@@ -160,6 +164,7 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
                 )
                 await vip.start()
                 self._vip_listener = vip
+                await self._notify_vip_state_change()
             except Exception:
                 _LOGGER.warning("Failed to start VIP event listener", exc_info=True)
         else:
@@ -201,6 +206,7 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
             with contextlib.suppress(Exception):
                 await self._vip_listener.stop()
             self._vip_listener = None
+            await self._notify_vip_state_change()
 
         old_client = self._client
         self._client = None
@@ -212,7 +218,16 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
 
         client = IconaBridgeClient(self.host, self.port)
         try:
-            await client.connect()
+            # Retry connect() on ECONNREFUSED — device may not have rejoined WiFi yet
+            # after waking from idle sleep. 4 attempts, 0.3s apart (≤1.15s total).
+            for _attempt in range(4):
+                try:
+                    await client.connect()
+                    break
+                except (ConnectionRefusedError, ConnectionComelitError):
+                    if _attempt >= 3:
+                        raise
+                    await asyncio.sleep(0.3)
             await authenticate(client, self.token)
             self._config = await get_device_config(client)
             await register_push(client, self._config, self._on_push_event)
@@ -233,6 +248,7 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
                 )
                 await vip.start()
                 self._vip_listener = vip
+                await self._notify_vip_state_change()
             except Exception:
                 _LOGGER.warning("Failed to start VIP listener on reconnect", exc_info=True)
 
@@ -296,6 +312,44 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
                 await cb()
             except Exception:
                 _LOGGER.exception("Error in video state change callback")
+
+    @property
+    def vip_listener_active(self) -> bool:
+        """Return True when the VIP event listener is running."""
+        return self._vip_listener is not None
+
+    @property
+    def notifications_enabled(self) -> bool:
+        """Return True when push notifications are enabled in options."""
+        return self.config_entry.options.get(CONF_ENABLE_NOTIFICATIONS, True)
+
+    def add_vip_state_change_callback(
+        self, callback: Callable[[], Awaitable[None]]
+    ) -> Callable[[], None]:
+        """Register an async callback invoked when the VIP listener starts or stops."""
+        self._on_vip_state_change[callback] = None
+
+        def _remove() -> None:
+            self._on_vip_state_change.pop(callback, None)
+
+        return _remove
+
+    async def _notify_vip_state_change(self) -> None:
+        """Fire all registered VIP state-change callbacks."""
+        for cb in list(self._on_vip_state_change):
+            try:
+                await cb()
+            except Exception:
+                _LOGGER.exception("Error in VIP state change callback")
+
+    async def async_restart_notifications(self) -> None:
+        """Stop and restart the VIP event listener."""
+        if self._vip_listener:
+            with contextlib.suppress(Exception):
+                await self._vip_listener.stop()
+            self._vip_listener = None
+            await self._notify_vip_state_change()
+        await self._ensure_vip_listener()
 
     def _on_push_event(self, event: PushEvent) -> None:
         """Dispatch a push event to all registered callbacks."""
@@ -391,6 +445,7 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
                 with contextlib.suppress(Exception):
                     await self._vip_listener.stop_task()
                 self._vip_listener = None
+                await self._notify_vip_state_change()
 
             t0 = time.monotonic()
             _LOGGER.info("Video session starting (CTPP setup)")
@@ -521,6 +576,7 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
             )
             await vip.start()
             self._vip_listener = vip
+            await self._notify_vip_state_change()
             _LOGGER.info("VIP event listener restarted")
         except Exception:
             _LOGGER.warning("Failed to restart VIP listener", exc_info=True)

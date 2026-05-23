@@ -29,11 +29,12 @@ class _DataUpdateCoordinator:
         """Allow DataUpdateCoordinator[T] syntax."""
         return cls
 
-    def __init__(self, hass, logger, *, name, update_interval):
+    def __init__(self, hass, logger, *, name, update_interval, config_entry=None):
         self.hass = hass
         self.logger = logger
         self.name = name
         self.update_interval = update_interval
+        self.config_entry = config_entry
 
     def async_set_updated_data(self, data):
         """No-op in tests."""
@@ -96,9 +97,13 @@ _ha_const.CONF_PORT = "port"
 _ha_const.CONF_TOKEN = "token"
 _ha_const.CONF_PASSWORD = "password"
 _ha_const.Platform = MagicMock()
+_ha_const.Platform.BINARY_SENSOR = "binary_sensor"
 _ha_const.Platform.BUTTON = "button"
 _ha_const.Platform.CAMERA = "camera"
 _ha_const.Platform.EVENT = "event"
+# EntityCategory is used by button and binary_sensor entities
+_ha_const.EntityCategory = MagicMock()
+_ha_const.EntityCategory.DIAGNOSTIC = "diagnostic"
 
 # Create the top-level homeassistant mock first, then wire child attributes
 _ha = MagicMock()
@@ -212,7 +217,33 @@ class _EventEntity:
 _ha_event = MagicMock()
 _ha_event.EventEntity = _EventEntity
 
+# Stub for homeassistant.components.binary_sensor
+class _BinarySensorEntity:
+    """Minimal stub for homeassistant.components.binary_sensor.BinarySensorEntity."""
+
+    _attr_has_entity_name = False
+    _attr_name = None
+    _attr_unique_id = None
+    _attr_device_class = None
+    _attr_entity_category = None
+
+    def async_write_ha_state(self) -> None:
+        """No-op in tests."""
+
+    def async_on_remove(self, func) -> None:
+        """No-op in tests."""
+
+
+class _BinarySensorDeviceClass:
+    CONNECTIVITY = "connectivity"
+
+
+_ha_binary_sensor = MagicMock()
+_ha_binary_sensor.BinarySensorEntity = _BinarySensorEntity
+_ha_binary_sensor.BinarySensorDeviceClass = _BinarySensorDeviceClass
+
 sys.modules["homeassistant.components"] = MagicMock()
+sys.modules["homeassistant.components.binary_sensor"] = _ha_binary_sensor
 sys.modules["homeassistant.components.button"] = _ha_button
 sys.modules["homeassistant.components.camera"] = _ha_camera
 sys.modules["homeassistant.components.event"] = _ha_event
