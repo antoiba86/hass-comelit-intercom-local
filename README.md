@@ -44,6 +44,7 @@ After setup, you can configure the integration via **Settings → Integrations �
 | Option | Default | Description |
 |--------|---------|-------------|
 | Enable notifications | On | Receive doorbell ring and door events. Disable if you only need video and door control, or to troubleshoot the notification connection. |
+| Verbose logging | Off | Enable detailed per-packet wire dump logs. When off, the chatty sub-loggers are pinned to INFO to keep the log clean under normal operation. |
 
 Changing this setting reloads the integration automatically.
 
@@ -167,6 +168,12 @@ Key operations:
 - **Push channel**: Registers FCM token; also used as a 90s keepalive probe — device ACKs with JSON, preventing false reconnect cycles
 
 ## Changelog
+
+### 0.1.4.4
+
+- **Verbose logging option** — new toggle in the integration options to enable detailed per-packet wire dump logs; chatty sub-loggers are pinned to INFO when off
+- **Notification service sensor** — new diagnostic binary sensor reflecting whether the VIP event listener is active
+- **Fix: false-positive `door_opened` events** — apartment-internal FSM transitions (`0x1860/0x0003`) no longer fire a `door_opened` event
 
 ### 0.1.4
 
