@@ -11,10 +11,12 @@
       "init": {
         "title": "Comelit Intercom Options",
         "data": {
-          "enable_notifications": "Enable doorbell notifications"
+          "enable_notifications": "Enable doorbell notifications",
+          "verbose_logging": "Verbose logging"
         },
         "data_description": {
-          "enable_notifications": "Receive doorbell ring and missed call events from the intercom"
+          "enable_notifications": "Receive doorbell ring and missed call events from the intercom",
+          "verbose_logging": "Enable detailed per-packet wire dump logs. When off, chatty sub-loggers are pinned to INFO to keep the log clean under normal operation."
         }
       }
     }
