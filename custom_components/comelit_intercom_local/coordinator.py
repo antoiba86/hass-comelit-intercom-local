@@ -29,6 +29,22 @@ from .vip_listener import VipEventListener
 
 _LOGGER = logging.getLogger(__name__)
 
+
+class _VerboseFilter(logging.Filter):
+    """Suppress noisy coordinator messages when verbose logging is disabled."""
+
+    _NOISY = ("Finished fetching",)
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if not is_verbose_logging():
+            msg = record.getMessage()
+            if any(n in msg for n in self._NOISY):
+                return False
+        return True
+
+
+_LOGGER.addFilter(_VerboseFilter())
+
 UPDATE_INTERVAL = timedelta(seconds=30)
 
 
