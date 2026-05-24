@@ -92,7 +92,6 @@ def _apply_log_levels(verbose: bool) -> None:
     set_verbose_logging(verbose)
 
 
-
 async def async_setup_entry(
     hass: HomeAssistant, entry: ComelitLocalConfigEntry
 ) -> bool:

@@ -96,7 +96,6 @@ _ha_const.CONF_PORT = "port"
 _ha_const.CONF_TOKEN = "token"
 _ha_const.CONF_PASSWORD = "password"
 _ha_const.Platform = MagicMock()
-_ha_const.Platform.BINARY_SENSOR = "binary_sensor"
 _ha_const.Platform.BUTTON = "button"
 _ha_const.Platform.CAMERA = "camera"
 _ha_const.Platform.EVENT = "event"
