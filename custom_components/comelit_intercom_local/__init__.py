@@ -90,12 +90,16 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
 def _apply_log_levels(verbose: bool) -> None:
     """Propagate the verbose_logging option to the component-wide flag."""
     set_verbose_logging(verbose)
+    domain_logger = logging.getLogger(f"custom_components.{DOMAIN}")
+    domain_logger.setLevel(logging.DEBUG if verbose else logging.WARNING)
 
 
 async def async_setup_entry(
     hass: HomeAssistant, entry: ComelitLocalConfigEntry
 ) -> bool:
     """Set up Comelit Local from a config entry."""
+    _apply_log_levels(entry.options.get(CONF_VERBOSE_LOGGING, False))
+
     coordinator = ComelitLocalCoordinator(
         hass,
         entry,
