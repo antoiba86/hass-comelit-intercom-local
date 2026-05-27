@@ -23,13 +23,13 @@ class TestParsePushEvent:
     def test_incoming_call_returns_doorbell_ring(self):
         event = _parse_push_event({"message": "incoming-call", "apt-address": "SB000006"})
         assert event is not None
-        assert event.event_type == "doorbell_ring"
+        assert event.event_type == "ring"
         assert event.apt_address == "SB000006"
 
     def test_push_incoming_call_returns_doorbell_ring(self):
         event = _parse_push_event({"message": "push-incoming-call", "apt-address": "SB000001"})
         assert event is not None
-        assert event.event_type == "doorbell_ring"
+        assert event.event_type == "ring"
 
     def test_missed_call_returns_missed_call(self):
         event = _parse_push_event({"message": "missed-call", "apt-address": "SB000006"})
@@ -123,7 +123,7 @@ class TestRegisterPush:
         assert installed_callback is not None
         installed_callback({"message": "incoming-call", "apt-address": "SB000006"})
         assert len(received) == 1
-        assert received[0].event_type == "doorbell_ring"
+        assert received[0].event_type == "ring"
 
     @pytest.mark.asyncio
     async def test_register_push_callback_ignores_unknown_events(self):

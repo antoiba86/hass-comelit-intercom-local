@@ -790,17 +790,27 @@ class TestIdrTracking:
 
     def test_log_idr_arrival_interval_zero_on_first_call(self, caplog):
         import logging
-        receiver = RtpReceiver("127.0.0.1")
-        with caplog.at_level(logging.DEBUG, logger="custom_components.comelit_intercom_local.rtp_receiver"):
-            receiver._log_idr_arrival(0x10000000)
-        assert "IDR #1" in caplog.text
-        assert "interval=0.00s" in caplog.text
+        from custom_components.comelit_intercom_local.const import set_verbose_logging
+        set_verbose_logging(True)
+        try:
+            receiver = RtpReceiver("127.0.0.1")
+            with caplog.at_level(logging.DEBUG, logger="custom_components.comelit_intercom_local.rtp_receiver"):
+                receiver._log_idr_arrival(0x10000000)
+            assert "IDR #1" in caplog.text
+            assert "interval=0.00s" in caplog.text
+        finally:
+            set_verbose_logging(False)
 
     def test_log_idr_arrival_logs_at_debug(self, caplog):
         import logging
-        receiver = RtpReceiver("127.0.0.1")
-        with caplog.at_level(logging.DEBUG, logger="custom_components.comelit_intercom_local.rtp_receiver"):
-            receiver._log_idr_arrival(0xABCDEF01)
-        # Must appear in DEBUG records, not only INFO+
-        debug_records = [r for r in caplog.records if r.levelno == logging.DEBUG]
-        assert any("IDR" in r.message for r in debug_records)
+        from custom_components.comelit_intercom_local.const import set_verbose_logging
+        set_verbose_logging(True)
+        try:
+            receiver = RtpReceiver("127.0.0.1")
+            with caplog.at_level(logging.DEBUG, logger="custom_components.comelit_intercom_local.rtp_receiver"):
+                receiver._log_idr_arrival(0xABCDEF01)
+            # Must appear in DEBUG records, not only INFO+
+            debug_records = [r for r in caplog.records if r.levelno == logging.DEBUG]
+            assert any("IDR" in r.message for r in debug_records)
+        finally:
+            set_verbose_logging(False)

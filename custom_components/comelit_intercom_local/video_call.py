@@ -11,6 +11,7 @@ import time
 
 from .channels import Channel, ChannelType
 from .client import IconaBridgeClient
+from .const import is_verbose_logging
 from .ctpp import ctpp_init_sequence
 from .exceptions import VideoCallError
 from .models import DeviceConfig
@@ -136,10 +137,11 @@ class VideoCallSession:
             action = (
                 struct.unpack_from(">H", resp, 6)[0] if len(resp) >= 8 else 0
             )
-            _LOGGER.debug(
-                "Codec exchange %d: type=0x%04X action=0x%04X our_counter=0x%08X",
-                i, msg_type, action, call_counter,
-            )
+            if is_verbose_logging():
+                _LOGGER.debug(
+                    "Codec exchange %d: type=0x%04X action=0x%04X our_counter=0x%08X",
+                    i, msg_type, action, call_counter,
+                )
             if msg_type in (0x1860, 0x1800):
                 continue
             if msg_type == 0x1840:
@@ -155,7 +157,8 @@ class VideoCallSession:
                         ctpp,
                         encode_call_response_ack(our_addr, entrance_addr, call_counter),
                     )
-                    _LOGGER.debug("Codec exchange complete (call accepted)")
+                    if is_verbose_logging():
+                        _LOGGER.debug("Codec exchange complete (call accepted)")
                     return call_counter
                 else:
                     call_counter += _CTR_INCR_BYTE4
@@ -238,11 +241,12 @@ class VideoCallSession:
             ctpp = client.get_channel("CTPP")
             if ctpp is not None:
                 self._owns_ctpp = False
-                _LOGGER.debug(
-                    "Reusing coordinator CTPP channel (server_id=%d) — "
-                    "skipping ctpp_init (already registered)",
-                    ctpp.server_channel_id,
-                )
+                if is_verbose_logging():
+                    _LOGGER.debug(
+                        "Reusing coordinator CTPP channel (server_id=%d) — "
+                        "skipping ctpp_init (already registered)",
+                        ctpp.server_channel_id,
+                    )
                 if client.get_channel("CSPB") is None:
                     await client.open_channel("CSPB", ChannelType.UAUT)
                 # Use a fresh timestamp; call phase needs a different session ID
@@ -292,7 +296,8 @@ class VideoCallSession:
             udpm_token = 0x0000
             if len(udpm.open_response_body) >= 18:
                 udpm_token = struct.unpack_from("<H", udpm.open_response_body, 16)[0]
-                _LOGGER.debug("UDPM token: 0x%04X", udpm_token)
+                if is_verbose_logging():
+                    _LOGGER.debug("UDPM token: 0x%04X", udpm_token)
 
             # PCAP-verified: control_req_id = UDPM server_channel_id (device-assigned).
             control_req_id = udpm.server_channel_id
@@ -335,11 +340,12 @@ class VideoCallSession:
             resp1 = await client.read_response(ctpp, timeout=VIDEO_RESPONSE_TIMEOUT)
             if resp1 and len(resp1) >= 6:
                 dev_counter = struct.unpack_from("<I", resp1, 2)[0]
-                _LOGGER.debug(
-                    "Call response: %d bytes, dev_counter=0x%08X, "
-                    "our_counter=0x%08X",
-                    len(resp1), dev_counter, call_counter,
-                )
+                if is_verbose_logging():
+                    _LOGGER.debug(
+                        "Call response: %d bytes, dev_counter=0x%08X, "
+                        "our_counter=0x%08X",
+                        len(resp1), dev_counter, call_counter,
+                    )
 
             # Send codec msg with our own incremented counter.
             # PCAP-verified: only +0x00010000 between call_init and codec
@@ -365,10 +371,11 @@ class VideoCallSession:
             # PCAP-verified: media_req_id = RTPC2 server_channel_id (device-assigned).
             # In PCAP: RTPC2 server_channel_id=0x606E (= UDPM server_channel_id + 2).
             media_req_id = rtpc2.server_channel_id
-            _LOGGER.debug(
-                "RTPC channels: rtpc1=0x%04X, rtpc2(media)=0x%04X",
-                rtpc1.request_id, media_req_id,
-            )
+            if is_verbose_logging():
+                _LOGGER.debug(
+                    "RTPC channels: rtpc1=0x%04X, rtpc2(media)=0x%04X",
+                    rtpc1.request_id, media_req_id,
+                )
 
             # Step 8: Send RTPC link (references RTPC1)
             # PCAP shows RTPC link reuses the last counter (no increment).
@@ -377,9 +384,10 @@ class VideoCallSession:
                 our_addr, entrance_addr, rtpc1.server_channel_id, call_counter
             )
             await client.send_binary(ctpp, rtpc_link)
-            _LOGGER.debug(
-                "Sent RTPC link, our_counter=0x%08X", call_counter
-            )
+            if is_verbose_logging():
+                _LOGGER.debug(
+                    "Sent RTPC link, our_counter=0x%08X", call_counter
+                )
 
             # Step 8b: Send video config IMMEDIATELY after RTPC link — BEFORE waiting
             # for device RTPC. PCAP shows the Android app sends VIDEO_CONFIG as message
@@ -391,9 +399,10 @@ class VideoCallSession:
                 our_addr, entrance_addr, media_req_id, call_counter
             )
             await client.send_binary(ctpp, vid_config)
-            _LOGGER.debug(
-                "Sent video config (before device RTPC), our_counter=0x%08X", call_counter
-            )
+            if is_verbose_logging():
+                _LOGGER.debug(
+                    "Sent video config (before device RTPC), our_counter=0x%08X", call_counter
+                )
 
             # Step 9: Now wait for device to open its own RTPC channel, then ACK
             # its CTPP RTPC link message.
@@ -408,9 +417,10 @@ class VideoCallSession:
                 await asyncio.wait_for(
                     device_rtpc.open_event.wait(), timeout=VIDEO_RESPONSE_TIMEOUT
                 )
-                _LOGGER.debug(
-                    "Device opened RTPC: 0x%04X", device_rtpc.server_channel_id
-                )
+                if is_verbose_logging():
+                    _LOGGER.debug(
+                        "Device opened RTPC: 0x%04X", device_rtpc.server_channel_id
+                    )
             except TimeoutError:
                 _LOGGER.warning("Device RTPC channel not received within timeout")
                 raise VideoCallError("Device RTPC channel not received")
@@ -430,9 +440,10 @@ class VideoCallSession:
                 our_addr, entrance_addr, call_counter, prefix=0x1840
             )
             await client.send_binary(ctpp, hangup_zero)
-            _LOGGER.debug(
-                "Sent initial HANGUP/ZERO (call accepted), counter=0x%08X", call_counter
-            )
+            if is_verbose_logging():
+                _LOGGER.debug(
+                    "Sent initial HANGUP/ZERO (call accepted), counter=0x%08X", call_counter
+                )
 
             # Step 10: Set media req_id and start decoder immediately.
             receiver.set_media_req_id(media_req_id)
@@ -469,7 +480,7 @@ class VideoCallSession:
                     "Check NAT/firewall for UDP, or firmware may need TCP.",
                     VIDEO_READY_TIMEOUT, udp, tcp,
                 )
-            else:
+            elif is_verbose_logging():
                 _LOGGER.info(
                     "Video flowing via %s transport",
                     "TCP" if receiver.tcp_media_packet_count else "UDP",
@@ -487,20 +498,22 @@ class VideoCallSession:
                     )
                 )
 
-            _LOGGER.debug(
-                "RTP receiver fully started: control=0x%04X, "
-                "media=0x%04X, udpm_token=0x%04X",
-                control_req_id, media_req_id, udpm_token,
-            )
+            if is_verbose_logging():
+                _LOGGER.debug(
+                    "RTP receiver fully started: control=0x%04X, "
+                    "media=0x%04X, udpm_token=0x%04X",
+                    control_req_id, media_req_id, udpm_token,
+                )
 
             # Step 11: Auto-timeout (skipped when stream handles lifecycle)
             if self._auto_timeout:
                 self._timeout_task = asyncio.create_task(self._auto_timeout_loop())
 
-            _LOGGER.info(
-                "Video call session started: our_addr=%s entrance=%s",
-                our_addr, entrance_addr,
-            )
+            if is_verbose_logging():
+                _LOGGER.info(
+                    "Video call session started: our_addr=%s entrance=%s",
+                    our_addr, entrance_addr,
+                )
             return receiver
 
         except Exception as e:
@@ -511,7 +524,8 @@ class VideoCallSession:
 
     async def stop(self, reason: str = "user request") -> None:
         """Stop the video session and clean up."""
-        _LOGGER.info("Stopping video call session (%s)", reason)
+        if is_verbose_logging():
+            _LOGGER.info("Stopping video call session (%s)", reason)
         await self._cleanup()
 
     async def _cleanup(self) -> None:
@@ -614,10 +628,11 @@ class VideoCallSession:
                 if msg_type == 0x1840:
                     if action == 0x0003:
                         # CALL_END (sub=0x0000 = timer, sub=0x000E = door-open triggered)
-                        _LOGGER.debug(
-                            "CTPP monitor: CALL_END received (sub=0x%04X) — re-establishing",
-                            sub,
-                        )
+                        if is_verbose_logging():
+                            _LOGGER.debug(
+                                "CTPP monitor: CALL_END received (sub=0x%04X) — re-establishing",
+                                sub,
+                            )
                         try:
                             async with self._ctpp_lock:
                                 call_counter = await self._inline_reestablish(
@@ -625,7 +640,8 @@ class VideoCallSession:
                                     rtpc1_server_id, media_req_id, call_counter,
                                 )
                                 self._call_counter = call_counter
-                            _LOGGER.debug("CTPP monitor: re-established, lease renewed")
+                            if is_verbose_logging():
+                                _LOGGER.debug("CTPP monitor: re-established, lease renewed")
                         except Exception:
                             _LOGGER.warning(
                                 "CTPP monitor: inline re-establish failed — "
@@ -643,10 +659,11 @@ class VideoCallSession:
                             self._call_counter = call_counter
                             ack = encode_call_response_ack(our_addr, entrance_addr, call_counter)
                             await client.send_binary(ctpp, ack)
-                        _LOGGER.debug(
-                            "CTPP monitor: ACKed 0x1840/0x%04X (sub=0x%04X), counter=0x%08X",
-                            action, sub, call_counter,
-                        )
+                        if is_verbose_logging():
+                            _LOGGER.debug(
+                                "CTPP monitor: ACKed 0x1840/0x%04X (sub=0x%04X), counter=0x%08X",
+                                action, sub, call_counter,
+                            )
                 elif msg_type == 0x1860:
                     # Device 0x1860 messages during an active session (e.g.
                     # 0x000A RTPC link that _ack_device_rtpc_link missed, or
@@ -656,13 +673,14 @@ class VideoCallSession:
                         self._call_counter = call_counter
                         ack = encode_call_response_ack(our_addr, entrance_addr, call_counter)
                         await client.send_binary(ctpp, ack)
-                    _LOGGER.debug(
-                        "CTPP monitor: ACKed 0x1860/0x%04X, counter=0x%08X",
-                        action, call_counter,
-                    )
+                    if is_verbose_logging():
+                        _LOGGER.debug(
+                            "CTPP monitor: ACKed 0x1860/0x%04X, counter=0x%08X",
+                            action, call_counter,
+                        )
                 elif msg_type == 0x1800:
                     pass  # device ACK — no response needed
-                else:
+                elif is_verbose_logging():
                     _LOGGER.debug(
                         "CTPP monitor: unexpected type=0x%04X (%d bytes)",
                         msg_type, len(resp),
@@ -768,13 +786,15 @@ class VideoCallSession:
             ctpp,
             encode_answer_peer(our_addr, entrance_addr, call_counter, renewal=True),
         )
-        _LOGGER.debug("Re-establish: sent renewal peer/accept (0x1860/0x0070)")
+        if is_verbose_logging():
+            _LOGGER.debug("Re-establish: sent renewal peer/accept (0x1860/0x0070)")
 
         # 9. Drain stale RTSP queues while keeping RTP seq/ts monotonic
         if self._rtsp_server:
             self._rtsp_server.reset(renewal=True)
 
-        _LOGGER.debug("Re-establish: done, counter=0x%08X", call_counter)
+        if is_verbose_logging():
+            _LOGGER.debug("Re-establish: done, counter=0x%08X", call_counter)
         return call_counter
 
     async def _run_answer_sequence(
@@ -822,7 +842,8 @@ class VideoCallSession:
                 ctpp,
                 encode_answer_peer(our_addr, entrance_addr, self._call_counter),
             )
-        _LOGGER.info("Answer peer/accept (0x70) sent — audio should start within ~400ms")
+        if is_verbose_logging():
+            _LOGGER.info("Answer peer/accept (0x70) sent — audio should start within ~400ms")
 
     async def async_open_door_on_ctpp(
         self, our_addr: str, entrance_addr: str, relay_index: int,
@@ -844,16 +865,18 @@ class VideoCallSession:
                 apt_addr=apt_addr,
             )
             await self._client.send_binary(ctpp, payload)
-        _LOGGER.info(
-            "Door open sent on video CTPP (relay=%d, counter=0x%08X)",
-            relay_index, self._call_counter,
-        )
+        if is_verbose_logging():
+            _LOGGER.info(
+                "Door open sent on video CTPP (relay=%d, counter=0x%08X)",
+                relay_index, self._call_counter,
+            )
 
     async def _auto_timeout_loop(self) -> None:
         """Automatically stop the session after VIDEO_SESSION_TIMEOUT."""
         try:
             await asyncio.sleep(VIDEO_SESSION_TIMEOUT)
-            _LOGGER.info("Video session timed out after %ds", VIDEO_SESSION_TIMEOUT)
+            if is_verbose_logging():
+                _LOGGER.info("Video session timed out after %ds", VIDEO_SESSION_TIMEOUT)
             await self._cleanup()
             if self._on_timeout:
                 self._on_timeout()

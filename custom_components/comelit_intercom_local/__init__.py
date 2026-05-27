@@ -10,7 +10,7 @@ from homeassistant.const import CONF_HOST, CONF_PORT, CONF_TOKEN, MAJOR_VERSION,
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
 
-from .const import CONF_VERBOSE_LOGGING, DEFAULT_PORT, DOMAIN, NOISY_SUBLOGGERS
+from .const import CONF_VERBOSE_LOGGING, DEFAULT_PORT, DOMAIN, set_verbose_logging
 from .coordinator import ComelitLocalConfigEntry, ComelitLocalCoordinator
 from .exceptions import (
     AuthenticationError,
@@ -88,15 +88,10 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
 
 
 def _apply_log_levels(verbose: bool) -> None:
-    """Pin the chatty per-packet sub-loggers to INFO unless verbose is on.
-
-    HA's logger config can still raise the rest of the integration to DEBUG
-    for door/video/vip-listener traces; this only suppresses the per-packet
-    wire dump that floods the log under normal operation.
-    """
-    level = logging.NOTSET if verbose else logging.INFO
-    for name in NOISY_SUBLOGGERS:
-        logging.getLogger(f"{__name__}.{name}").setLevel(level)
+    """Propagate the verbose_logging option to the component-wide flag."""
+    set_verbose_logging(verbose)
+    domain_logger = logging.getLogger(f"custom_components.{DOMAIN}")
+    domain_logger.setLevel(logging.DEBUG if verbose else logging.WARNING)
 
 
 async def async_setup_entry(

@@ -43,7 +43,7 @@ class TestDoorbellEventMeta:
 
     def test_event_types(self):
         from custom_components.comelit_intercom_local.event import EVENT_TYPES
-        assert "doorbell_ring" in EVENT_TYPES
+        assert "ring" in EVENT_TYPES
         assert "missed_call" in EVENT_TYPES
 
     def test_device_info_returns_dict(self):
@@ -61,10 +61,10 @@ class TestDoorbellEventMeta:
 class TestOnPush:
     def test_doorbell_ring_triggers_event(self):
         entity = _make_entity()
-        entity._on_push(_push_event("doorbell_ring"))
+        entity._on_push(_push_event("ring"))
 
         assert len(entity._events) == 1
-        assert entity._events[0]["event_type"] == "doorbell_ring"
+        assert entity._events[0]["event_type"] == "ring"
 
     def test_missed_call_triggers_event(self):
         entity = _make_entity()
@@ -81,17 +81,17 @@ class TestOnPush:
 
     def test_apt_address_included_in_event_data(self):
         entity = _make_entity()
-        entity._on_push(_push_event("doorbell_ring", apt_address="SB000006"))
+        entity._on_push(_push_event("ring", apt_address="SB000006"))
 
         assert entity._events[0]["data"]["apt_address"] == "SB000006"
 
     def test_multiple_events_accumulated(self):
         entity = _make_entity()
-        entity._on_push(_push_event("doorbell_ring"))
+        entity._on_push(_push_event("ring"))
         entity._on_push(_push_event("missed_call"))
 
         assert len(entity._events) == 2
-        assert entity._events[0]["event_type"] == "doorbell_ring"
+        assert entity._events[0]["event_type"] == "ring"
         assert entity._events[1]["event_type"] == "missed_call"
 
 
@@ -132,10 +132,10 @@ class TestAsyncAddedToHass:
         await entity.async_added_to_hass()
 
         # Simulate the coordinator calling back
-        captured_callback(_push_event("doorbell_ring"))
+        captured_callback(_push_event("ring"))
 
         assert len(entity._events) == 1
-        assert entity._events[0]["event_type"] == "doorbell_ring"
+        assert entity._events[0]["event_type"] == "ring"
 
 
 # ---------------------------------------------------------------------------
@@ -175,7 +175,7 @@ class TestCoordinatorPushCallbacks:
         coord.add_push_callback(cb1)
         coord.add_push_callback(cb2)
 
-        event = PushEvent(event_type="doorbell_ring")
+        event = PushEvent(event_type="ring")
         coord._on_push_event(event)
 
         cb1.assert_called_once_with(event)
@@ -188,7 +188,7 @@ class TestCoordinatorPushCallbacks:
         coord.add_push_callback(cb1)
         coord.add_push_callback(cb2)
 
-        event = PushEvent(event_type="doorbell_ring")
+        event = PushEvent(event_type="ring")
         coord._on_push_event(event)  # must not raise
 
         cb2.assert_called_once_with(event)
@@ -199,6 +199,6 @@ class TestCoordinatorPushCallbacks:
         remove = coord.add_push_callback(cb)
         remove()
 
-        coord._on_push_event(PushEvent(event_type="doorbell_ring"))
+        coord._on_push_event(PushEvent(event_type="ring"))
 
         cb.assert_not_called()

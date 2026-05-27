@@ -11,6 +11,7 @@ import struct
 
 from .channels import Channel
 from .client import IconaBridgeClient
+from .const import is_verbose_logging
 from .protocol import encode_call_response_ack, encode_ctpp_init
 
 _LOGGER = logging.getLogger(__name__)
@@ -69,9 +70,10 @@ async def ctpp_init_sequence(
         await client.send_binary(
             channel, encode_call_response_ack(our_addr, apt_addr, ack_ts, prefix=0x1820)
         )
-        _LOGGER.debug(
-            "CTPP ACK pair sent (init_ts=0x%08X ack_ts=0x%08X)", timestamp, ack_ts,
-        )
+        if is_verbose_logging():
+            _LOGGER.debug(
+                "CTPP ACK pair sent (init_ts=0x%08X ack_ts=0x%08X)", timestamp, ack_ts,
+            )
 
 async def read_response_ctpp(
     client: IconaBridgeClient,
@@ -94,31 +96,11 @@ async def read_response_ctpp(
             prefix = struct.unpack_from("<H", resp, 0)[0]
             resp_ts = struct.unpack_from("<I", resp, 2)[0]
             action = struct.unpack_from(">H", resp, 6)[0]
-            _LOGGER.debug(
-                "CTPP init response %d: %d bytes prefix=0x%04X ts=0x%08X action=0x%04X hex=%s",
-                i + 1, len(resp), prefix, resp_ts, action, resp[:32].hex(),
-            )
-            if prefix == _PREFIX_VIP_EVENT and ack_config:
-                our_addr = ack_config["our_addr"]
-                apt_addr = ack_config["apt_addr"]
-                init_ts = ack_config["init_ts"]
-                ack_ts = (init_ts + _VIP_ACK_TS_INCR) & 0xFFFFFFFF
+            if is_verbose_logging():
                 _LOGGER.debug(
-                    "CTPP init: sending ACK pair (init_ts=0x%08X ack_ts=0x%08X)",
-                    init_ts, ack_ts,
+                    "CTPP init response %d: %d bytes, prefix=0x%04X ts=0x%08X action=0x%04X",
+                    i + 1, len(resp), prefix, resp_ts, action,
                 )
-                try:
-                    await client.send_binary(
-                        channel,
-                        encode_call_response_ack(our_addr, apt_addr, ack_ts),
-                    )
-                    await client.send_binary(
-                        channel,
-                        encode_call_response_ack(our_addr, apt_addr, ack_ts, prefix=0x1820),
-                    )
-                    return True
-                except Exception:
-                    _LOGGER.debug("CTPP init: ACK pair failed (connection closing)")
         else:
-            _LOGGER.debug("CTPP init response %d: timeout (no data)", i + 1)
-    return False
+            if is_verbose_logging():
+                _LOGGER.debug("CTPP init response %d: no response (timeout)", i + 1)

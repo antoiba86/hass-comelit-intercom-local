@@ -16,7 +16,7 @@
         },
         "data_description": {
           "enable_notifications": "Receive doorbell ring and missed call events from the intercom",
-          "verbose_logging": "Log every TCP packet, RTP frame, and RTSP frame at DEBUG. Off by default — enable only when troubleshooting."
+          "verbose_logging": "Enable detailed per-packet wire dump logs. When off, chatty sub-loggers are pinned to INFO to keep the log clean under normal operation."
         }
       }
     }

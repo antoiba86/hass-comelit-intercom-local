@@ -13,7 +13,7 @@ from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import DOMAIN, MANUFACTURER, MODEL
+from .const import DOMAIN, MANUFACTURER, MODEL, is_verbose_logging
 from .coordinator import ComelitLocalConfigEntry, ComelitLocalCoordinator
 from .models import Door
 
@@ -75,7 +75,8 @@ class ComelitDoorButton(CoordinatorEntity[ComelitLocalCoordinator], ButtonEntity
 
     async def async_press(self) -> None:
         """Open the door when pressed."""
-        _LOGGER.info("Opening door: %s", self._door.name)
+        if is_verbose_logging():
+            _LOGGER.info("Opening door: %s", self._door.name)
         try:
             await self.coordinator.async_open_door(self._door)
         except Exception:
@@ -83,7 +84,8 @@ class ComelitDoorButton(CoordinatorEntity[ComelitLocalCoordinator], ButtonEntity
             return
 
         if self.coordinator.video_session and self.coordinator.video_session.active:
-            _LOGGER.info("Door opened — stopping video in 10s")
+            if is_verbose_logging():
+                _LOGGER.info("Door opened — stopping video in 10s")
             # Mark the stop as user-initiated NOW (before the 10s delay, but
             # after the door-open has been dispatched — the coordinator's
             # path selection in async_open_door depends on video_session
@@ -102,7 +104,8 @@ class ComelitDoorButton(CoordinatorEntity[ComelitLocalCoordinator], ButtonEntity
         """
         await asyncio.sleep(delay)
         if self.coordinator.video_session and self.coordinator.video_session.active:
-            _LOGGER.info("Stopping video after door-open delay")
+            if is_verbose_logging():
+                _LOGGER.info("Stopping video after door-open delay")
             await self.coordinator.async_stop_video()
 
 
@@ -138,10 +141,12 @@ class ComelitStartVideoButton(CoordinatorEntity[ComelitLocalCoordinator], Button
         if not self.coordinator.device_config:
             return
         t0 = time.monotonic()
-        _LOGGER.info("Starting intercom video")
+        if is_verbose_logging():
+            _LOGGER.info("Starting intercom video")
         try:
             await self.coordinator.async_start_video(by_user=True)
-            _LOGGER.info("Video ready in %.1fs", time.monotonic() - t0)
+            if is_verbose_logging():
+                _LOGGER.info("Video ready in %.1fs", time.monotonic() - t0)
         except Exception:
             _LOGGER.exception("Failed to start intercom video after %.1fs", time.monotonic() - t0)
 
@@ -175,7 +180,8 @@ class ComelitStopVideoButton(CoordinatorEntity[ComelitLocalCoordinator], ButtonE
 
     async def async_press(self) -> None:
         """Stop intercom video when pressed."""
-        _LOGGER.info("Stopping intercom video")
+        if is_verbose_logging():
+            _LOGGER.info("Stopping intercom video")
         try:
             self.coordinator.request_video_stop()
             await self.coordinator.async_stop_video()
