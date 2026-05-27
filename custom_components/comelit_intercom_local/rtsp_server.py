@@ -39,6 +39,8 @@ import socket
 import struct
 import time
 
+from .const import is_verbose_logging
+
 _LOGGER = logging.getLogger(__name__)
 
 _MAX_RTP_PAYLOAD = 1400  # bytes — safe MTU headroom
@@ -209,7 +211,8 @@ class LocalRtspServer:
             asyncio.create_task(self._rtcp_sr_loop()),
         ]
 
-        _LOGGER.info("RTSP server started: %s", self.rtsp_url)
+        if is_verbose_logging():
+            _LOGGER.info("RTSP server started: %s", self.rtsp_url)
         return self.rtsp_url
 
     async def stop(self) -> None:
@@ -236,7 +239,8 @@ class LocalRtspServer:
                 sock.close()
                 setattr(self, sock_attr, None)
 
-        _LOGGER.debug("RTSP server stopped")
+        if is_verbose_logging():
+            _LOGGER.debug("RTSP server stopped")
 
     def mark_ready(self) -> None:
         """Signal that a video session is flowing — unblocks pending PLAYs."""
@@ -262,10 +266,11 @@ class LocalRtspServer:
             with contextlib.suppress(Exception):
                 c.writer.close()
         if clients:
-            _LOGGER.debug(
-                "RTSP: disconnected %d client(s) — forcing reconnect on new video session",
-                len(clients),
-            )
+            if is_verbose_logging():
+                _LOGGER.debug(
+                    "RTSP: disconnected %d client(s) — forcing reconnect on new video session",
+                    len(clients),
+                )
 
     def reset(self, renewal: bool = False) -> None:
         """Reset for a new or renewed video call session.
@@ -328,12 +333,13 @@ class LocalRtspServer:
         for client in list(self._active_clients):
             self._prime_client_with_parameter_sets(client)
 
-        _LOGGER.debug(
-            "RTSP server reset (renewal=%s): drained %d NALs + %d audio, "
-            "%d client(s) remain, video_ts_out seeded to 0x%08X",
-            renewal, drained_nal, drained_audio,
-            len(self._active_clients), self._video_ts_out,
-        )
+        if is_verbose_logging():
+            _LOGGER.debug(
+                "RTSP server reset (renewal=%s): drained %d NALs + %d audio, "
+                "%d client(s) remain, video_ts_out seeded to 0x%08X",
+                renewal, drained_nal, drained_audio,
+                len(self._active_clients), self._video_ts_out,
+            )
 
     # ------------------------------------------------------------------
     # RTSP request handling
@@ -345,7 +351,8 @@ class LocalRtspServer:
         """Handle one RTSP client connection."""
         peer = writer.get_extra_info("peername")
         client_host = peer[0] if peer else "unknown"
-        _LOGGER.debug("RTSP client connected from %s", client_host)
+        if is_verbose_logging():
+            _LOGGER.debug("RTSP client connected from %s", client_host)
 
         # Disable Nagle's algorithm — send RTP packets immediately
         # instead of batching them (adds up to 40ms latency per packet)
@@ -383,7 +390,8 @@ class LocalRtspServer:
                         headers[k.strip().lower()] = v.strip()
 
                 cseq = headers.get("cseq", "1")
-                _LOGGER.debug("RTSP %s from %s", method, client_host)
+                if is_verbose_logging():
+                    _LOGGER.debug("RTSP %s from %s", method, client_host)
 
                 if method == "OPTIONS":
                     self._send(writer, cseq, extra=(
@@ -422,10 +430,11 @@ class LocalRtspServer:
                     # its connect phase, so when video becomes ready it
                     # transitions directly to reading frames.
                     if not self._ready_event.is_set():
-                        _LOGGER.debug(
-                            "PLAY from %s waiting for video readiness",
-                            client_host,
-                        )
+                        if is_verbose_logging():
+                            _LOGGER.debug(
+                                "PLAY from %s waiting for video readiness",
+                                client_host,
+                            )
                         try:
                             await asyncio.wait_for(
                                 self._ready_event.wait(), timeout=10.0
@@ -443,12 +452,13 @@ class LocalRtspServer:
                     ))
                     self._active_clients.append(client)
                     registered = True
-                    _LOGGER.info(
-                        "RTSP streaming → %s (video_ch=%s audio_ch=%s) "
-                        "[%d client(s) total]",
-                        client_host, client.video_ch, client.audio_ch,
-                        len(self._active_clients),
-                    )
+                    if is_verbose_logging():
+                        _LOGGER.info(
+                            "RTSP streaming → %s (video_ch=%s audio_ch=%s) "
+                            "[%d client(s) total]",
+                            client_host, client.video_ch, client.audio_ch,
+                            len(self._active_clients),
+                        )
                     # Immediately send in-band SPS + PPS to this client so
                     # FFmpeg's H.264 parser populates codecpar.format before
                     # the stream worker freezes its output template.  Without
@@ -473,15 +483,17 @@ class LocalRtspServer:
         except (asyncio.TimeoutError, ConnectionError):
             pass
         except Exception:
-            _LOGGER.debug("RTSP client error", exc_info=True)
+            if is_verbose_logging():
+                _LOGGER.debug("RTSP client error", exc_info=True)
         finally:
             if registered:
                 with contextlib.suppress(ValueError):
                     self._active_clients.remove(client)
-                _LOGGER.debug(
-                    "RTSP client disconnected from %s [%d client(s) remain]",
-                    client_host, len(self._active_clients),
-                )
+                if is_verbose_logging():
+                    _LOGGER.debug(
+                        "RTSP client disconnected from %s [%d client(s) remain]",
+                        client_host, len(self._active_clients),
+                    )
             with contextlib.suppress(Exception):
                 writer.close()
 
@@ -598,12 +610,14 @@ class LocalRtspServer:
                     struct.pack("!BBH", 0x24, client.video_ch, len(pkt)) + pkt
                 )
             except Exception:
-                _LOGGER.debug("Failed to prime client with parameter sets", exc_info=True)
+                if is_verbose_logging():
+                    _LOGGER.debug("Failed to prime client with parameter sets", exc_info=True)
                 return
-        _LOGGER.debug(
-            "Primed RTSP client with SPS (%d B) + PPS (%d B)",
-            len(self._latest_sps), len(self._latest_pps),
-        )
+        if is_verbose_logging():
+            _LOGGER.debug(
+                "Primed RTSP client with SPS (%d B) + PPS (%d B)",
+                len(self._latest_sps), len(self._latest_pps),
+            )
 
     def _send_initial_sr_to_client(self, client: _TcpClient) -> None:
         """Send a one-shot video + audio SR to a single client before any RTP.
@@ -665,10 +679,11 @@ class LocalRtspServer:
                 self._active_clients.remove(c)
             with contextlib.suppress(Exception):
                 c.writer.close()
-            _LOGGER.info(
-                "Removed dead RTSP client [%d remain]",
-                len(self._active_clients),
-            )
+            if is_verbose_logging():
+                _LOGGER.info(
+                    "Removed dead RTSP client [%d remain]",
+                    len(self._active_clients),
+                )
 
         # UDP fallback — single client (last SETUP wins)
         if self._udp_host:
@@ -745,7 +760,8 @@ class LocalRtspServer:
         except asyncio.CancelledError:
             pass
         except Exception:
-            _LOGGER.debug("Video RTP pass-through loop error", exc_info=True)
+            if is_verbose_logging():
+                _LOGGER.debug("Video RTP pass-through loop error", exc_info=True)
 
     def _translate_video_ts(self, device_ts: int) -> None:
         """Translate device RTP timestamp to monotonic output timestamp."""
@@ -754,13 +770,14 @@ class LocalRtspServer:
                 self._video_ts_out + 1 - device_ts
             ) & 0xFFFFFFFF
             self._video_ts_rebase_pending = False
-            _LOGGER.debug(
-                "Video timestamp rebased: device=0x%08X seed=0x%08X "
-                "new_out=0x%08X offset=0x%08X",
-                device_ts, self._video_ts_out,
-                (device_ts + self._video_ts_offset) & 0xFFFFFFFF,
-                self._video_ts_offset,
-            )
+            if is_verbose_logging():
+                _LOGGER.debug(
+                    "Video timestamp rebased: device=0x%08X seed=0x%08X "
+                    "new_out=0x%08X offset=0x%08X",
+                    device_ts, self._video_ts_out,
+                    (device_ts + self._video_ts_offset) & 0xFFFFFFFF,
+                    self._video_ts_offset,
+                )
         else:
             forward = (device_ts - self._last_device_ts) & 0xFFFFFFFF
             if forward > 0x80000000:
@@ -768,13 +785,14 @@ class LocalRtspServer:
                 self._video_ts_offset = (
                     self._video_ts_out + 1 - device_ts
                 ) & 0xFFFFFFFF
-                _LOGGER.debug(
-                    "Video timestamp rebased (backward): device=0x%08X "
-                    "prev_out=0x%08X new_out=0x%08X offset=0x%08X",
-                    device_ts, prev_out,
-                    (device_ts + self._video_ts_offset) & 0xFFFFFFFF,
-                    self._video_ts_offset,
-                )
+                if is_verbose_logging():
+                    _LOGGER.debug(
+                        "Video timestamp rebased (backward): device=0x%08X "
+                        "prev_out=0x%08X new_out=0x%08X offset=0x%08X",
+                        device_ts, prev_out,
+                        (device_ts + self._video_ts_offset) & 0xFFFFFFFF,
+                        self._video_ts_offset,
+                    )
         self._last_device_ts = device_ts
         self._video_ts_out = (device_ts + self._video_ts_offset) & 0xFFFFFFFF
 
@@ -860,24 +878,26 @@ class LocalRtspServer:
                         self._video_ts_out + 1 - device_ts
                     ) & 0xFFFFFFFF
                     self._video_ts_rebase_pending = False
-                    _LOGGER.debug(
-                        "Video timestamp rebased (bootstrap): "
-                        "device_ts=0x%08X out=0x%08X offset=0x%08X",
-                        device_ts, self._video_ts_out + 1,
-                        self._video_ts_offset,
-                    )
+                    if is_verbose_logging():
+                        _LOGGER.debug(
+                            "Video timestamp rebased (bootstrap): "
+                            "device_ts=0x%08X out=0x%08X offset=0x%08X",
+                            device_ts, self._video_ts_out + 1,
+                            self._video_ts_offset,
+                        )
                 else:
                     forward = (device_ts - self._last_device_ts) & 0xFFFFFFFF
                     if forward > 0x80000000:
                         self._video_ts_offset = (
                             self._video_ts_out + 1 - device_ts
                         ) & 0xFFFFFFFF
-                        _LOGGER.debug(
-                            "Video timestamp rebased (backward jump): "
-                            "device_ts=0x%08X out=0x%08X offset=0x%08X",
-                            device_ts, self._video_ts_out + 1,
-                            self._video_ts_offset,
-                        )
+                        if is_verbose_logging():
+                            _LOGGER.debug(
+                                "Video timestamp rebased (backward jump): "
+                                "device_ts=0x%08X out=0x%08X offset=0x%08X",
+                                device_ts, self._video_ts_out + 1,
+                                self._video_ts_offset,
+                            )
 
                 self._last_device_ts = device_ts
                 self._video_ts_out = (device_ts + self._video_ts_offset) & 0xFFFFFFFF
@@ -887,7 +907,8 @@ class LocalRtspServer:
         except asyncio.CancelledError:
             pass
         except Exception:
-            _LOGGER.debug("Video feed loop error", exc_info=True)
+            if is_verbose_logging():
+                _LOGGER.debug("Video feed loop error", exc_info=True)
 
     def _send_h264(self, nal_data: bytes) -> None:
         """Packetize one H.264 NAL unit and broadcast to all clients."""
@@ -959,7 +980,8 @@ class LocalRtspServer:
         except asyncio.CancelledError:
             pass
         except Exception:
-            _LOGGER.debug("Audio feed loop error", exc_info=True)
+            if is_verbose_logging():
+                _LOGGER.debug("Audio feed loop error", exc_info=True)
 
     # ------------------------------------------------------------------
     # RTCP — Sender Reports
@@ -1010,7 +1032,8 @@ class LocalRtspServer:
         except asyncio.CancelledError:
             pass
         except Exception:
-            _LOGGER.debug("RTCP SR loop error", exc_info=True)
+            if is_verbose_logging():
+                _LOGGER.debug("RTCP SR loop error", exc_info=True)
 
     def _broadcast_rtcp(self, pkt: bytes, is_video: bool) -> None:
         """Send one RTCP packet to every TCP and UDP client.

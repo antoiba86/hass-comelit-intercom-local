@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.1.4.4
+
+- **Verbose logging option** — new toggle in the integration options (Settings → Integrations → Configure) to enable detailed per-packet wire dump logs. When off, the chatty sub-loggers (`client`, `rtp_receiver`, `rtsp_server`) are pinned to INFO regardless of HA's logger config, keeping the log clean under normal operation.
+- **Notification service sensor** — new diagnostic binary sensor (`binary_sensor.<name>_notification_service`) reflecting whether the VIP event listener is active. Unavailable when notifications are disabled in options.
+- **Fix: false-positive `door_opened` events** — `0x1860/0x0003` fired by the device after a missed or abandoned ring (apartment-internal FSM transition) no longer triggers a `door_opened` event; only entrance-initiated opens (caller = entrance address, e.g. `SB100001`) are reported.
+- **Observability: `decode_misses` counter** — `VipEventListener` now tracks unknown or unhandled `(prefix, action)` pairs; useful for detecting unimplemented event types or firmware changes.
+- **Observability: `restart_count`** — `VipEventListener` exposes the number of times its listen loop has restarted after an unhandled exception.
+
+## 0.1.4.3
+
+- **Fix: Deleted unnecessary code**
+
 ## 0.1.4.2
 
 **Door open fixes:**

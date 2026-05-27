@@ -10,7 +10,7 @@ from homeassistant.const import CONF_HOST, CONF_PORT, CONF_TOKEN, MAJOR_VERSION,
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
 
-from .const import DEFAULT_PORT, DOMAIN
+from .const import CONF_VERBOSE_LOGGING, DEFAULT_PORT, DOMAIN, set_verbose_logging
 from .coordinator import ComelitLocalConfigEntry, ComelitLocalCoordinator
 from .exceptions import (
     AuthenticationError,
@@ -87,10 +87,19 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     return True
 
 
+def _apply_log_levels(verbose: bool) -> None:
+    """Propagate the verbose_logging option to the component-wide flag."""
+    set_verbose_logging(verbose)
+    domain_logger = logging.getLogger(f"custom_components.{DOMAIN}")
+    domain_logger.setLevel(logging.DEBUG if verbose else logging.WARNING)
+
+
 async def async_setup_entry(
     hass: HomeAssistant, entry: ComelitLocalConfigEntry
 ) -> bool:
     """Set up Comelit Local from a config entry."""
+    _apply_log_levels(entry.options.get(CONF_VERBOSE_LOGGING, False))
+
     coordinator = ComelitLocalCoordinator(
         hass,
         entry,

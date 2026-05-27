@@ -11,6 +11,7 @@ import socket
 import struct
 
 from .channels import Channel, ChannelType
+from .const import is_verbose_logging
 from .exceptions import ConnectionComelitError, ProtocolError
 from .protocol import (
     HEADER_SIZE,
@@ -30,6 +31,7 @@ _LOGGER = logging.getLogger(__name__)
 
 CONNECT_TIMEOUT = 10
 READ_TIMEOUT = 30
+IDLE_TIMEOUT = 45
 
 
 class IconaBridgeClient:
@@ -86,7 +88,8 @@ class IconaBridgeClient:
 
         self._connected = True
         self._receive_task = asyncio.create_task(self._receive_loop())
-        _LOGGER.debug("Connected to %s:%s", self.host, self.port)
+        if is_verbose_logging():
+            _LOGGER.debug("Connected to %s:%s", self.host, self.port)
 
     async def disconnect(self) -> None:
         """Close the TCP connection.
@@ -112,13 +115,15 @@ class IconaBridgeClient:
             if not future.done():
                 future.cancel()
         self._callbacks.clear()
-        _LOGGER.debug("Disconnected from %s:%s", self.host, self.port)
+        if is_verbose_logging():
+            _LOGGER.debug("Disconnected from %s:%s", self.host, self.port)
 
     async def _send(self, data: bytes) -> None:
         """Send raw bytes to the device."""
         if not self._writer:
             raise ConnectionComelitError("Not connected")
-        _LOGGER.debug(f"Writing {len(data)} bytes: {data.hex(' ')}")
+        if is_verbose_logging():
+            _LOGGER.debug(f"Writing {len(data)} bytes: {data.hex(' ')}")
         self._writer.write(data)
         try:
             await self._writer.drain()
@@ -131,17 +136,19 @@ class IconaBridgeClient:
             raise ConnectionComelitError("Not connected")
         header = await self._reader.readexactly(HEADER_SIZE)
         body_length, request_id = decode_header(header)
-        _LOGGER.debug(
-            "Read header: %s (body_length=%d, request_id=%d)",
-            header.hex(" "),
-            body_length,
-            request_id,
-        )
+        if is_verbose_logging():
+            _LOGGER.debug(
+                "Read header: %s (body_length=%d, request_id=%d)",
+                header.hex(" "),
+                body_length,
+                request_id,
+            )
         body = await self._reader.readexactly(body_length) if body_length > 0 else b""
-        if is_json_body(body):
-            _LOGGER.debug("Read JSON body (%d bytes): %s", len(body), body.decode("utf-8", errors="replace")[:500])
-        else:
-            _LOGGER.debug("Read binary body (%d bytes): %s", len(body), body.hex(" ")[:200])
+        if is_verbose_logging():
+            if is_json_body(body):
+                _LOGGER.debug("Read JSON body (%d bytes): %s", len(body), body.decode("utf-8", errors="replace")[:500])
+            else:
+                _LOGGER.debug("Read binary body (%d bytes): %s", len(body), body.hex(" ")[:200])
         return request_id, body
 
     def set_disconnect_callback(self, callback: Callable[[], None]) -> None:
@@ -160,25 +167,28 @@ class IconaBridgeClient:
         containers, so we can't rely on the OS to close the socket when the
         device goes to sleep without sending a FIN.
         """
-        _LOGGER.debug("Receive loop started")
+        if is_verbose_logging():
+            _LOGGER.debug("Receive loop started")
         unexpected = False
         try:
             while self._connected:
-                _LOGGER.debug("Waiting for next packet...")
+                if is_verbose_logging():
+                    _LOGGER.debug("Waiting for next packet...")
                 try:
                     request_id, body = await asyncio.wait_for(
-                        self._read_packet(), timeout=120.0
+                        self._read_packet(), timeout=IDLE_TIMEOUT
                     )
                 except TimeoutError:
                     _LOGGER.warning(
-                        "No data received for 120s — marking connection dead"
+                        "No data received for %ds — marking connection dead", IDLE_TIMEOUT
                     )
                     self._connected = False
                     unexpected = True
                     break
                 self._dispatch(request_id, body)
         except asyncio.IncompleteReadError:
-            _LOGGER.info("Connection closed by device")
+            if is_verbose_logging():
+                _LOGGER.info("Connection closed by device")
             self._connected = False
             unexpected = True
         except asyncio.CancelledError:
@@ -196,12 +206,13 @@ class IconaBridgeClient:
         if request_id == 0:
             if len(body) >= 4:
                 msg_type, seq, server_ch_id = parse_command_response(body)
-                _LOGGER.debug(
-                    "Command response: type=0x%04X seq=%d ch_id=%d",
-                    msg_type,
-                    seq,
-                    server_ch_id,
-                )
+                if is_verbose_logging():
+                    _LOGGER.debug(
+                        "Command response: type=0x%04X seq=%d ch_id=%d",
+                        msg_type,
+                        seq,
+                        server_ch_id,
+                    )
 
                 if msg_type == 0xABCD and seq == 1 and len(body) >= 10:
                     # Device-initiated channel open (seq=1). Parse the
@@ -216,9 +227,10 @@ class IconaBridgeClient:
                     except (ValueError, struct.error):
                         # No null terminator — name runs to end minus 3 bytes
                         dev_req_id = struct.unpack_from("<H", body, len(body) - 3)[0]
-                    _LOGGER.debug(
-                        "Device channel open: dev_req_id=0x%04X", dev_req_id,
-                    )
+                    if is_verbose_logging():
+                        _LOGGER.debug(
+                            "Device channel open: dev_req_id=0x%04X", dev_req_id,
+                        )
                     # Send COMMAND response back to device
                     resp_pkt = encode_channel_open_response(dev_req_id)
                     if self._writer:
@@ -232,10 +244,11 @@ class IconaBridgeClient:
                             ch.sequence = 3
                             ch.open_response_body = body
                             ch.open_event.set()
-                            _LOGGER.debug(
-                                "Placeholder %s assigned dev_req_id=0x%04X",
-                                ch.name, dev_req_id,
-                            )
+                            if is_verbose_logging():
+                                _LOGGER.debug(
+                                    "Placeholder %s assigned dev_req_id=0x%04X",
+                                    ch.name, dev_req_id,
+                                )
                             break
                     return
 
@@ -250,9 +263,10 @@ class IconaBridgeClient:
                             ch.sequence = seq + 1
                             ch.open_response_body = body
                             ch.open_event.set()
-                            _LOGGER.debug(
-                                "Channel %s assigned id=%d", ch.name, server_ch_id
-                            )
+                            if is_verbose_logging():
+                                _LOGGER.debug(
+                                    "Channel %s assigned id=%d", ch.name, server_ch_id
+                                )
                             break
                 elif msg_type == 0x01EF and len(body) >= 10:
                     # Device-initiated channel close (END type, sub_type=2 in bytes 4-7).
@@ -274,24 +288,28 @@ class IconaBridgeClient:
                         )
                         if self._writer:
                             self._writer.write(ack_pkt)
-                        _LOGGER.debug(
-                            "Sent close ACK for ch=0x%04X (device-initiated END)",
-                            server_ch_id,
-                        )
+                        if is_verbose_logging():
+                            _LOGGER.debug(
+                                "Sent close ACK for ch=0x%04X (device-initiated END)",
+                                server_ch_id,
+                            )
                     else:
-                        _LOGGER.debug(
-                            "Device ACKed our close: ch=0x%04X sub_type=%d",
-                            server_ch_id, sub_type,
-                        )
+                        if is_verbose_logging():
+                            _LOGGER.debug(
+                                "Device ACKed our close: ch=0x%04X sub_type=%d",
+                                server_ch_id, sub_type,
+                            )
                 else:
-                    _LOGGER.debug(
-                        "Non-COMMAND message type=0x%04X (not assigning)", msg_type
-                    )
+                    if is_verbose_logging():
+                        _LOGGER.debug(
+                            "Non-COMMAND message type=0x%04X (not assigning)", msg_type
+                        )
             return
 
         # Data response — check if there's a waiting future (for send_json)
         if request_id in self._callbacks:
-            _LOGGER.debug("Matched callback for request_id=%d", request_id)
+            if is_verbose_logging():
+                _LOGGER.debug("Matched callback for request_id=%d", request_id)
             future = self._callbacks.pop(request_id)
             if not future.done():
                 future.set_result(body)
@@ -301,27 +319,31 @@ class IconaBridgeClient:
         for ch in self._channels.values():
             if ch.server_channel_id == request_id and ch.is_open:
                 ch.response_queue.put_nowait(body)
-                if is_json_body(body):
-                    _LOGGER.debug("Queued JSON on %s (%d bytes)", ch.name, len(body))
-                else:
-                    _LOGGER.debug("Queued binary on %s (%d bytes)", ch.name, len(body))
+                if is_verbose_logging():
+                    if is_json_body(body):
+                        _LOGGER.debug("Queued JSON on %s (%d bytes)", ch.name, len(body))
+                    else:
+                        _LOGGER.debug("Queued binary on %s (%d bytes)", ch.name, len(body))
                 return
 
         # Check for push notification or unsolicited message
         if is_json_body(body):
             try:
                 msg = decode_json_body(body)
-                _LOGGER.debug("Unsolicited JSON on channel %d: %s", request_id, msg)
+                if is_verbose_logging():
+                    _LOGGER.debug("Unsolicited JSON on channel %d: %s", request_id, msg)
                 if self._push_callback:
                     self._push_callback(msg)
             except Exception:  # noqa: BLE001
-                _LOGGER.debug(
-                    "Failed to decode unsolicited body on channel %d", request_id
-                )
+                if is_verbose_logging():
+                    _LOGGER.debug(
+                        "Failed to decode unsolicited body on channel %d", request_id
+                    )
         else:
-            _LOGGER.debug(
-                "Unsolicited binary on channel %d, %d bytes", request_id, len(body)
-            )
+            if is_verbose_logging():
+                _LOGGER.debug(
+                    "Unsolicited binary on channel %d, %d bytes", request_id, len(body)
+                )
 
     def _next_request_id(self) -> int:
         """Return the next request ID for a channel open packet."""
@@ -350,10 +372,11 @@ class IconaBridgeClient:
         protocol_name = wire_name or name
         request_id = self._next_request_id()
         seq = 1  # Device expects sequence=1 for all channel opens
-        _LOGGER.debug(
-            "Opening channel %s (wire=%s): type=%d, request_id=%d, seq=%d, extra=%s",
-            name, protocol_name, int(channel_type), request_id, seq, extra_data,
-        )
+        if is_verbose_logging():
+            _LOGGER.debug(
+                "Opening channel %s (wire=%s): type=%d, request_id=%d, seq=%d, extra=%s",
+                name, protocol_name, int(channel_type), request_id, seq, extra_data,
+            )
         channel = Channel(
             name=name,
             channel_type=channel_type,
@@ -399,10 +422,11 @@ class IconaBridgeClient:
             raise ProtocolError(f"Channel {channel.name} not open")
 
         async with channel.send_lock:
-            _LOGGER.debug(
-                "send_json on %s (server_channel_id=%d): %s",
-                channel.name, channel.server_channel_id, msg,
-            )
+            if is_verbose_logging():
+                _LOGGER.debug(
+                    "send_json on %s (server_channel_id=%d): %s",
+                    channel.name, channel.server_channel_id, msg,
+                )
 
             loop = asyncio.get_running_loop()
             future: asyncio.Future[bytes] = loop.create_future()
@@ -413,6 +437,9 @@ class IconaBridgeClient:
 
             try:
                 body = await asyncio.wait_for(future, timeout=READ_TIMEOUT)
+            except asyncio.CancelledError:
+                self._callbacks.pop(channel.server_channel_id, None)
+                raise
             except TimeoutError:
                 _LOGGER.error(
                     "Timeout on %s (server_channel_id=%d), pending_callbacks=%s",

@@ -18,7 +18,7 @@ from .auth import authenticate
 from .channels import ChannelType
 from .client import IconaBridgeClient
 from .config_reader import get_device_config
-from .const import CONF_ENABLE_NOTIFICATIONS, DOMAIN
+from .const import CONF_ENABLE_NOTIFICATIONS, DOMAIN, is_verbose_logging
 from .ctpp import ctpp_init_sequence
 from .door import open_door
 from .models import DeviceConfig, Door, PushEvent
@@ -28,6 +28,22 @@ from .video_call import VideoCallSession
 from .vip_listener import VipEventListener
 
 _LOGGER = logging.getLogger(__name__)
+
+
+class _VerboseFilter(logging.Filter):
+    """Suppress noisy coordinator messages when verbose logging is disabled."""
+
+    _NOISY = ("Finished fetching",)
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if not is_verbose_logging():
+            msg = record.getMessage()
+            if any(n in msg for n in self._NOISY):
+                return False
+        return True
+
+
+_LOGGER.addFilter(_VerboseFilter())
 
 UPDATE_INTERVAL = timedelta(seconds=30)
 
@@ -128,10 +144,11 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
             ts,
         )
         self._ctpp_init_ts = ts
-        _LOGGER.info(
-            "CTPP channels opened for VIP events (address=%s, ts=0x%08X)",
-            our_addr, ts,
-        )
+        if is_verbose_logging():
+            _LOGGER.info(
+                "CTPP channels opened for VIP events (address=%s, ts=0x%08X)",
+                our_addr, ts,
+            )
         return ts
 
     async def async_setup(self) -> None:
@@ -163,7 +180,8 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
             except Exception:
                 _LOGGER.warning("Failed to start VIP event listener", exc_info=True)
         else:
-            _LOGGER.info("VIP event listener disabled via options")
+            if is_verbose_logging():
+                _LOGGER.info("VIP event listener disabled via options")
 
         self._start_keepalive()
 
@@ -172,14 +190,16 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
             rtsp = LocalRtspServer()
             self._rtsp_url = await rtsp.start()
             self._rtsp_server = rtsp
-            _LOGGER.info("Persistent RTSP server started: %s", self._rtsp_url)
+            if is_verbose_logging():
+                _LOGGER.info("Persistent RTSP server started: %s", self._rtsp_url)
 
         self.async_set_updated_data(self._config)
-        _LOGGER.info(
-            "Comelit setup complete: %d doors, %d cameras",
-            len(self._config.doors),
-            len(self._config.cameras),
-        )
+        if is_verbose_logging():
+            _LOGGER.info(
+                "Comelit setup complete: %d doors, %d cameras",
+                len(self._config.doors),
+                len(self._config.cameras),
+            )
 
     async def _reconnect(self) -> None:
         """Tear down old connection and re-establish everything."""
@@ -208,7 +228,8 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
             try:
                 await old_client.disconnect()
             except Exception:
-                _LOGGER.debug("Error disconnecting old client", exc_info=True)
+                if is_verbose_logging():
+                    _LOGGER.debug("Error disconnecting old client", exc_info=True)
 
         client = IconaBridgeClient(self.host, self.port)
         try:
@@ -237,7 +258,8 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
                 _LOGGER.warning("Failed to start VIP listener on reconnect", exc_info=True)
 
         self._start_keepalive()
-        _LOGGER.info("Comelit reconnected successfully")
+        if is_verbose_logging():
+            _LOGGER.info("Comelit reconnected successfully")
 
     async def async_shutdown(self) -> None:
         """Disconnect from the device."""
@@ -350,7 +372,8 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
             raise RuntimeError("Not configured")
 
         if self._video_start_lock.locked():
-            _LOGGER.debug("Video start already in progress — skipping duplicate call")
+            if is_verbose_logging():
+                _LOGGER.debug("Video start already in progress — skipping duplicate call")
             if self._video_session:
                 return self._video_session
             raise RuntimeError("Video start already in progress")
@@ -365,7 +388,8 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
             # check the stale task would reset _video_stopped_by_user and call
             # mark_ready(), causing go2rtc to reconnect into a dead stream.
             if self._video_stopped_by_user and not by_user:
-                _LOGGER.debug("Skipping auto-restart — video was stopped by user")
+                if is_verbose_logging():
+                    _LOGGER.debug("Skipping auto-restart — video was stopped by user")
                 raise RuntimeError("Video was stopped by user — not auto-restarting")
 
             # If the TCP connection died (120s receive-loop timeout) before the
@@ -373,7 +397,8 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
             # we don't start a session on a dead socket and wait 30s for UDPM
             # to time out.
             if not self._client.connected:
-                _LOGGER.info("Client disconnected — reconnecting before video start")
+                if is_verbose_logging():
+                    _LOGGER.info("Client disconnected — reconnecting before video start")
                 try:
                     await self._reconnect()
                 except Exception as err:
@@ -392,7 +417,8 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
                 self._vip_listener = None
 
             t0 = time.monotonic()
-            _LOGGER.info("Video session starting (CTPP setup)")
+            if is_verbose_logging():
+                _LOGGER.info("Video session starting (CTPP setup)")
             session = VideoCallSession(
                 self._client,
                 self._config,
@@ -413,7 +439,8 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
             # through a different code path and is not affected, so the
             # user-visible latency stays at ~3 s.
             await session.start()
-            _LOGGER.info("Video session ready in %.1fs", time.monotonic() - t0)
+            if is_verbose_logging():
+                _LOGGER.info("Video session ready in %.1fs", time.monotonic() - t0)
             self._video_session = session
             self._video_ready_event.set()
             # Unblock PLAY handlers that have been waiting inside the RTSP
@@ -431,7 +458,8 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
         """Called by VideoCallSession when the device sends CALL_END."""
         if self._video_stopped_by_user:
             return
-        _LOGGER.info("CALL_END received — scheduling session restart")
+        if is_verbose_logging():
+            _LOGGER.info("CALL_END received — scheduling session restart")
         self.hass.async_create_task(self._auto_restart_video())
 
     async def _auto_restart_video(self) -> None:
@@ -445,7 +473,8 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
         try:
             await self.async_start_video()
         except RuntimeError as err:
-            _LOGGER.debug("Auto-restart skipped: %s", err)
+            if is_verbose_logging():
+                _LOGGER.debug("Auto-restart skipped: %s", err)
         except Exception:
             _LOGGER.warning("Auto-restart failed", exc_info=True)
 
@@ -481,7 +510,7 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
         raises within 10s (ProtocolError timeout) — the receive-loop will
         also detect the dead connection shortly after and trigger reconnect.
         """
-        KEEPALIVE_INTERVAL = 90
+        KEEPALIVE_INTERVAL = 30
         KEEPALIVE_TIMEOUT = 10.0
 
         while True:
@@ -493,11 +522,13 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
                     send_push_keepalive(self._client, self._config),
                     timeout=KEEPALIVE_TIMEOUT,
                 )
-                _LOGGER.debug("Keepalive OK")
+                if is_verbose_logging():
+                    _LOGGER.debug("Keepalive OK")
             except asyncio.CancelledError:
                 raise
             except Exception:
-                _LOGGER.debug("Keepalive failed — connection may be dead", exc_info=True)
+                if is_verbose_logging():
+                    _LOGGER.debug("Keepalive failed — connection may be dead", exc_info=True)
                 # Don't force-reconnect here; the receive-loop will detect the
                 # dead socket and set client.connected = False within seconds,
                 # which the coordinator's health-check will pick up.
@@ -520,7 +551,8 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
             )
             await vip.start()
             self._vip_listener = vip
-            _LOGGER.info("VIP event listener restarted")
+            if is_verbose_logging():
+                _LOGGER.info("VIP event listener restarted")
         except Exception:
             _LOGGER.warning("Failed to restart VIP listener", exc_info=True)
 
@@ -579,7 +611,8 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
         """
         if self._client is None:
             return  # already shut down
-        _LOGGER.debug("TCP connection lost — scheduling immediate reconnect")
+        if is_verbose_logging():
+            _LOGGER.debug("TCP connection lost — scheduling immediate reconnect")
         self.hass.async_create_task(self.async_request_refresh())
 
     async def _async_update_data(self) -> DeviceConfig:

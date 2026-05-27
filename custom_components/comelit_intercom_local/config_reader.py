@@ -6,6 +6,7 @@ import logging
 
 from .channels import ChannelType, ViperMessageId
 from .client import IconaBridgeClient
+from .const import is_verbose_logging
 from .exceptions import ProtocolError
 from .models import Camera, DeviceConfig, Door
 
@@ -24,7 +25,8 @@ async def get_device_config(client: IconaBridgeClient) -> DeviceConfig:
     }
 
     response = await client.send_json(channel, msg)
-    _LOGGER.debug("Config response keys: %s", list(response.keys()))
+    if is_verbose_logging():
+        _LOGGER.debug("Config response keys: %s", list(response.keys()))
 
     code = response.get("response-code", 0)
     if code != 200:
@@ -47,7 +49,8 @@ def _parse_config(data: dict) -> DeviceConfig:
     entrance_book = user_params.get("entrance-address-book", [])
     if entrance_book:
         config.caller_address = entrance_book[0].get("apt-address", "")
-        _LOGGER.debug("Caller address from entrance-address-book: %s", config.caller_address)
+        if is_verbose_logging():
+            _LOGGER.debug("Caller address from entrance-address-book: %s", config.caller_address)
 
     # Parse doors from opendoor-address-book
     door_index = 0
@@ -92,7 +95,8 @@ def _parse_config(data: dict) -> DeviceConfig:
             )
         )
 
-    _LOGGER.info(
-        "Parsed config: %d doors, %d cameras", len(config.doors), len(config.cameras)
-    )
+    if is_verbose_logging():
+        _LOGGER.info(
+            "Parsed config: %d doors, %d cameras", len(config.doors), len(config.cameras)
+        )
     return config

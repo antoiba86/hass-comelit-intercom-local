@@ -26,6 +26,7 @@ import struct
 import time
 
 from .client import IconaBridgeClient
+from .const import is_verbose_logging
 from .ctpp import _CTR_INCR_BOTH
 from .models import DeviceConfig, PushEvent
 from .protocol import encode_call_response_ack
@@ -146,7 +147,8 @@ class VipEventListener:
 
         self._running = True
         self._task = asyncio.create_task(self._listen_loop())
-        _LOGGER.info("VIP event listener started on CTPP channel")
+        if is_verbose_logging():
+            _LOGGER.info("VIP event listener started on CTPP channel")
 
     async def stop_task(self) -> None:
         """Cancel the listener task only — leave CTPP_VIP / CSPB_VIP channels
@@ -183,11 +185,12 @@ class VipEventListener:
         """Parse and dispatch a binary CTPP message."""
         msg = parse_ctpp_message(data)
         if msg is None:
-            _LOGGER.debug(
-                "VIP: unparseable message (%d bytes): %s",
-                len(data),
-                data[:40].hex(),
-            )
+            if is_verbose_logging():
+                _LOGGER.debug(
+                    "VIP: unparseable message (%d bytes): %s",
+                    len(data),
+                    data[:40].hex(),
+                )
             return
 
         prefix = msg["prefix"]
@@ -219,11 +222,12 @@ class VipEventListener:
         _is_video_tail = prefix == PREFIX_VIDEO_EVENT
         if is_retransmit:
             if _is_video_tail:
-                _LOGGER.debug(
-                    "VIP: expected video-tail retransmit ignored "
-                    "(prefix=0x%04X action=0x%04X ts=0x%08X)",
-                    prefix, action, ts,
-                )
+                if is_verbose_logging():
+                    _LOGGER.debug(
+                        "VIP: expected video-tail retransmit ignored "
+                        "(prefix=0x%04X action=0x%04X ts=0x%08X)",
+                        prefix, action, ts,
+                    )
             else:
                 _LOGGER.warning(
                     "VIP RETRANSMIT: prefix=0x%04X action=0x%04X ts=0x%08X "
@@ -231,19 +235,21 @@ class VipEventListener:
                     prefix, action, ts, addresses,
                 )
         elif _is_real_vip:
-            _LOGGER.info(
-                "VIP event: prefix=0x%04X action=0x%04X ts=0x%08X flags=0x%04X addrs=%s (%d bytes)",
-                prefix, action, ts,
-                msg.get("flags", 0),
-                addresses, len(data),
-            )
+            if is_verbose_logging():
+                _LOGGER.info(
+                    "VIP event: prefix=0x%04X action=0x%04X ts=0x%08X flags=0x%04X addrs=%s (%d bytes)",
+                    prefix, action, ts,
+                    msg.get("flags", 0),
+                    addresses, len(data),
+                )
         else:
-            _LOGGER.debug(
-                "VIP tail/keepalive: prefix=0x%04X action=0x%04X ts=0x%08X (%d bytes)",
-                prefix, action, ts, len(data),
-            )
+            if is_verbose_logging():
+                _LOGGER.debug(
+                    "VIP tail/keepalive: prefix=0x%04X action=0x%04X ts=0x%08X (%d bytes)",
+                    prefix, action, ts, len(data),
+                )
 
-        if _LOGGER.isEnabledFor(logging.DEBUG):
+        if is_verbose_logging():
             _LOGGER.debug("VIP raw: %s", data.hex())
 
         # 0x1860/0x0010 is the device's periodic registration renewal signal.
@@ -306,10 +312,11 @@ class VipEventListener:
                 self._channel,
                 encode_call_response_ack(vip_address, entrance_addr, self._ack_ts),
             )
-            _LOGGER.debug(
-                "VIP: sent event ACK (action=0x%04X, ts=0x%08X)",
-                msg["action"], self._ack_ts,
-            )
+            if is_verbose_logging():
+                _LOGGER.debug(
+                    "VIP: sent event ACK (action=0x%04X, ts=0x%08X)",
+                    msg["action"], self._ack_ts,
+                )
         except Exception:
             _LOGGER.warning("VIP: failed to send event ACK", exc_info=True)
 
@@ -333,10 +340,11 @@ class VipEventListener:
                 self._channel,
                 encode_call_response_ack(vip_address, apt_addr, self._ack_ts, prefix=0x1820),
             )
-            _LOGGER.info(
-                "VIP: sent renewal ACK pair (device_ts=0x%08X ack_ts=0x%08X)",
-                msg["timestamp"], self._ack_ts,
-            )
+            if is_verbose_logging():
+                _LOGGER.info(
+                    "VIP: sent renewal ACK pair (device_ts=0x%08X ack_ts=0x%08X)",
+                    msg["timestamp"], self._ack_ts,
+                )
         except Exception:
             _LOGGER.warning("VIP: failed to send renewal ACK", exc_info=True)
 
@@ -349,22 +357,24 @@ class VipEventListener:
         # A 0x18C0 (call init) from the device means the device is initiating
         # a call to us — this IS the doorbell ring event.
         if prefix == PREFIX_CALL_INIT:
-            _LOGGER.debug(
-                "CTPP call init received (action=0x%04X, addrs=%s)",
-                action,
-                addresses,
-            )
+            if is_verbose_logging():
+                _LOGGER.debug(
+                    "CTPP call init received (action=0x%04X, addrs=%s)",
+                    action,
+                    addresses,
+                )
             self._fire_event("doorbell_ring", addresses)
             return
 
         # 0x1860 = VIP FSM event. Action encodes the event subtype — see ACTION_* constants.
         if prefix == PREFIX_VIP_EVENT and action != 0:
-            _LOGGER.debug(
-                "VIP FSM event received: action=0x%04X flags=0x%04X addrs=%s",
-                action,
-                msg.get("flags", 0),
-                addresses,
-            )
+            if is_verbose_logging():
+                _LOGGER.debug(
+                    "VIP FSM event received: action=0x%04X flags=0x%04X addrs=%s",
+                    action,
+                    msg.get("flags", 0),
+                    addresses,
+                )
             if action == ACTION_IN_ALERTING:
                 # IN_ALERTING: someone rang the doorbell
                 self._fire_event("doorbell_ring", addresses)
@@ -384,28 +394,32 @@ class VipEventListener:
                 # IDLE: device returned to idle state
                 pass
             else:
-                _LOGGER.debug(
-                    "VIP FSM event ignored (unknown action=0x%04X)", action
-                )
+                if is_verbose_logging():
+                    _LOGGER.debug(
+                        "VIP FSM event ignored (unknown action=0x%04X)", action
+                    )
             return
 
         # 0x1840 events are call-related but may be codec negotiation, config
         # acks, etc. Only log them for now — don't fire events.
-        _LOGGER.debug(
-            "VIP event (not doorbell): prefix=0x%04X action=0x%04X addrs=%s",
-            prefix,
-            action,
-            addresses,
-        )
+        if is_verbose_logging():
+            _LOGGER.debug(
+                "VIP event (not doorbell): prefix=0x%04X action=0x%04X addrs=%s",
+                prefix,
+                action,
+                addresses,
+            )
 
     def _fire_event(self, event_type: str, addresses: list[str]) -> None:
         """Create and dispatch a PushEvent, deduplicating rapid retransmissions."""
         now = time.time()
         if now - self._last_fired.get(event_type, 0.0) < self._dedup_window:
-            _LOGGER.debug("VIP: suppressing duplicate %s event", event_type)
+            if is_verbose_logging():
+                _LOGGER.debug("VIP: suppressing duplicate %s event", event_type)
             return
         self._last_fired[event_type] = now
-        _LOGGER.info("VIP: firing %s event (addrs=%s)", event_type, addresses)
+        if is_verbose_logging():
+            _LOGGER.info("VIP: firing %s event (addrs=%s)", event_type, addresses)
 
         caller = addresses[0] if addresses else ""
         event = PushEvent(

@@ -4,18 +4,18 @@ from __future__ import annotations
 
 import logging
 
-from homeassistant.components.event import EventEntity
+from homeassistant.components.event import DoorbellEventType, EventDeviceClass, EventEntity
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import DOMAIN, MANUFACTURER, MODEL
+from .const import DOMAIN, MANUFACTURER, MODEL, is_verbose_logging
 from .coordinator import ComelitLocalConfigEntry, ComelitLocalCoordinator
 from .models import PushEvent
 
 _LOGGER = logging.getLogger(__name__)
 
-EVENT_TYPES = ["doorbell_ring", "missed_call"]
+EVENT_TYPES = [DoorbellEventType.RING, "missed_call"]
 
 
 async def async_setup_entry(
@@ -33,6 +33,7 @@ class ComelitDoorbellEvent(EventEntity):
 
     _attr_has_entity_name = True
     _attr_translation_key = "doorbell"
+    _attr_device_class = EventDeviceClass.DOORBELL
     _attr_event_types = EVENT_TYPES
     _attr_icon = "mdi:doorbell"
 
@@ -66,4 +67,5 @@ class ComelitDoorbellEvent(EventEntity):
         if event.event_type in EVENT_TYPES:
             self._trigger_event(event.event_type, {"apt_address": event.apt_address})
             self.async_write_ha_state()
-            _LOGGER.info("Doorbell event fired: %s", event.event_type)
+            if is_verbose_logging():
+                _LOGGER.info("Doorbell event fired: %s", event.event_type)
