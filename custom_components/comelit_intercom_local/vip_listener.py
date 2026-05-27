@@ -221,10 +221,10 @@ class VipEventListener:
         # (no valid counter) so the device retransmits briefly then stops on its own.
         _is_video_tail = prefix == PREFIX_VIDEO_EVENT
         if is_retransmit:
-            if _is_expected_retransmit:
+            if _is_video_tail:
                 if is_verbose_logging():
                     _LOGGER.debug(
-                        "VIP: expected retransmit ignored "
+                        "VIP: expected video-tail retransmit ignored "
                         "(prefix=0x%04X action=0x%04X ts=0x%08X)",
                         prefix, action, ts,
                     )
@@ -314,8 +314,8 @@ class VipEventListener:
             )
             if is_verbose_logging():
                 _LOGGER.debug(
-                    "VIP: sent event ACK (action=0x%04X, dev_ts=0x%08X, ack_ts=0x%08X)",
-                    msg["action"], msg["timestamp"], ack_ts,
+                    "VIP: sent event ACK (action=0x%04X, ts=0x%08X)",
+                    msg["action"], self._ack_ts,
                 )
         except Exception:
             _LOGGER.warning("VIP: failed to send event ACK", exc_info=True)
@@ -363,7 +363,7 @@ class VipEventListener:
                     action,
                     addresses,
                 )
-            self._fire_event("ring", addresses)
+            self._fire_event("doorbell_ring", addresses)
             return
 
         # 0x1860 = VIP FSM event. Action encodes the event subtype — see ACTION_* constants.
@@ -377,27 +377,13 @@ class VipEventListener:
                 )
             if action == ACTION_IN_ALERTING:
                 # IN_ALERTING: someone rang the doorbell
-                self._fire_event("ring", addresses)
+                self._fire_event("doorbell_ring", addresses)
             elif action == ACTION_CONNECTED:
                 # CONNECTED: call was answered
                 pass
             elif action == ACTION_DOOR_OPENED:
-                # 0x1860/0x0003 fires in two distinct cases:
-                # - Real door open: caller (addresses[0]) is an entrance
-                #   address (e.g. SB100001), echoing which entrance opened
-                # - Apartment-side FSM transition after a missed/abandoned
-                #   ring: caller is the apartment's own bare address (e.g.
-                #   SB000006), no entrance involved
-                # Only fire door_opened in the first case.
-                caller = addresses[0] if addresses else ""
-                if caller and caller == self._config.apt_address:
-                    if is_verbose_logging():
-                        _LOGGER.debug(
-                            "VIP FSM 0x0003 ignored (apartment-internal, addrs=%s)",
-                            addresses,
-                        )
-                else:
-                    self._fire_event("door_opened", addresses)
+                # OUT_INITIATED / door opened (confirmed by testing)
+                self._fire_event("door_opened", addresses)
             elif action == ACTION_OUT_ALERTING:
                 # OUT_ALERTING: outgoing call is ringing
                 pass
@@ -408,23 +394,20 @@ class VipEventListener:
                 # IDLE: device returned to idle state
                 pass
             else:
-                key = (prefix, action)
-                self.decode_misses[key] = self.decode_misses.get(key, 0) + 1
                 if is_verbose_logging():
-                    _LOGGER.info(
-                        "VIP FSM event ignored (unknown action=0x%04X, miss_count=%d)",
-                        action, self.decode_misses[key],
+                    _LOGGER.debug(
+                        "VIP FSM event ignored (unknown action=0x%04X)", action
                     )
             return
 
         # 0x1840 events are call-related but may be codec negotiation, config
         # acks, etc. Only log them for now — don't fire events.
-        key = (prefix, action)
-        self.decode_misses[key] = self.decode_misses.get(key, 0) + 1
         if is_verbose_logging():
-            _LOGGER.info(
-                "VIP event (not doorbell): prefix=0x%04X action=0x%04X addrs=%s (miss_count=%d)",
-                prefix, action, addresses, self.decode_misses[key],
+            _LOGGER.debug(
+                "VIP event (not doorbell): prefix=0x%04X action=0x%04X addrs=%s",
+                prefix,
+                action,
+                addresses,
             )
 
     def _fire_event(self, event_type: str, addresses: list[str]) -> None:
