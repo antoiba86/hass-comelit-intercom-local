@@ -27,7 +27,7 @@ import time
 
 from .client import IconaBridgeClient
 from .const import is_verbose_logging
-from .ctpp import _CTR_INCR_BOTH
+from .ctpp import _VIP_ACK_TS_INCR
 from .models import DeviceConfig, PushEvent
 from .protocol import encode_call_response_ack
 
@@ -272,10 +272,10 @@ class VipEventListener:
             or (prefix == PREFIX_VIP_EVENT and action == ACTION_DOOR_OPENED)
         )
         if is_retransmit:
-            if _is_video_tail:
+            if _is_expected_retransmit:
                 if is_verbose_logging():
                     _LOGGER.debug(
-                        "VIP: expected video-tail retransmit ignored "
+                        "VIP: expected retransmit ignored "
                         "(prefix=0x%04X action=0x%04X ts=0x%08X)",
                         prefix, action, ts,
                     )
@@ -415,7 +415,7 @@ class VipEventListener:
                     action,
                     addresses,
                 )
-            self._fire_event("doorbell_ring", addresses)
+            self._fire_event("ring", addresses)
             return
 
         # 0x1860 = VIP FSM event. Action encodes the event subtype — see ACTION_* constants.
@@ -429,7 +429,7 @@ class VipEventListener:
                 )
             if action == ACTION_IN_ALERTING:
                 # IN_ALERTING: someone rang the doorbell
-                self._fire_event("doorbell_ring", addresses)
+                self._fire_event("ring", addresses)
             elif action == ACTION_CONNECTED:
                 # CONNECTED: call was answered
                 pass
@@ -443,10 +443,11 @@ class VipEventListener:
                 # Only fire door_opened in the first case.
                 caller = addresses[0] if addresses else ""
                 if caller and caller == self._config.apt_address:
-                    _LOGGER.debug(
-                        "VIP FSM 0x0003 ignored (apartment-internal, addrs=%s)",
-                        addresses,
-                    )
+                    if is_verbose_logging():
+                        _LOGGER.debug(
+                            "VIP FSM 0x0003 ignored (apartment-internal, addrs=%s)",
+                            addresses,
+                        )
                 else:
                     self._fire_event("door_opened", addresses)
             elif action == ACTION_OUT_ALERTING:
@@ -459,20 +460,23 @@ class VipEventListener:
                 # IDLE: device returned to idle state
                 pass
             else:
+                key = (prefix, action)
+                self.decode_misses[key] = self.decode_misses.get(key, 0) + 1
                 if is_verbose_logging():
                     _LOGGER.debug(
-                        "VIP FSM event ignored (unknown action=0x%04X)", action
+                        "VIP FSM event ignored (unknown action=0x%04X, miss_count=%d)",
+                        action, self.decode_misses[key],
                     )
             return
 
         # 0x1840 events are call-related but may be codec negotiation, config
         # acks, etc. Only log them for now — don't fire events.
+        key = (prefix, action)
+        self.decode_misses[key] = self.decode_misses.get(key, 0) + 1
         if is_verbose_logging():
             _LOGGER.debug(
-                "VIP event (not doorbell): prefix=0x%04X action=0x%04X addrs=%s",
-                prefix,
-                action,
-                addresses,
+                "VIP event (not doorbell): prefix=0x%04X action=0x%04X addrs=%s (miss_count=%d)",
+                prefix, action, addresses, self.decode_misses[key],
             )
 
     def _fire_event(self, event_type: str, addresses: list[str]) -> None:

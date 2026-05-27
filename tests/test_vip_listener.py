@@ -149,18 +149,18 @@ class TestFireEvent:
         cb = MagicMock()
         listener = _make_listener(cb)
 
-        listener._fire_event("doorbell_ring", ["SB000001"])
+        listener._fire_event("ring", ["SB000001"])
 
         cb.assert_called_once()
         event: PushEvent = cb.call_args[0][0]
-        assert event.event_type == "doorbell_ring"
+        assert event.event_type == "ring"
         assert event.apt_address == "SB000001"
 
     def test_first_address_used_as_apt_address(self):
         cb = MagicMock()
         listener = _make_listener(cb)
 
-        listener._fire_event("doorbell_ring", ["SB000001", "SB000006"])
+        listener._fire_event("ring", ["SB000001", "SB000006"])
 
         event: PushEvent = cb.call_args[0][0]
         assert event.apt_address == "SB000001"
@@ -169,7 +169,7 @@ class TestFireEvent:
         cb = MagicMock()
         listener = _make_listener(cb)
 
-        listener._fire_event("doorbell_ring", [])
+        listener._fire_event("ring", [])
 
         event: PushEvent = cb.call_args[0][0]
         assert event.apt_address == ""
@@ -179,8 +179,8 @@ class TestFireEvent:
         listener = _make_listener(cb)
         listener._dedup_window = 10.0
 
-        listener._fire_event("doorbell_ring", [])
-        listener._fire_event("doorbell_ring", [])
+        listener._fire_event("ring", [])
+        listener._fire_event("ring", [])
 
         cb.assert_called_once()
 
@@ -188,7 +188,7 @@ class TestFireEvent:
         cb = MagicMock()
         listener = _make_listener(cb)
 
-        listener._fire_event("doorbell_ring", [])
+        listener._fire_event("ring", [])
         listener._fire_event("door_opened", [])
 
         assert cb.call_count == 2
@@ -198,10 +198,10 @@ class TestFireEvent:
         listener = _make_listener(cb)
 
         # Pre-seed the last_fired time so it appears old
-        listener._last_fired["doorbell_ring"] = time.time() - 20.0
+        listener._last_fired["ring"] = time.time() - 20.0
         listener._dedup_window = 10.0
 
-        listener._fire_event("doorbell_ring", [])
+        listener._fire_event("ring", [])
 
         cb.assert_called_once()
 
@@ -209,7 +209,7 @@ class TestFireEvent:
         cb = MagicMock()
         listener = _make_listener(cb)
 
-        listener._fire_event("doorbell_ring", ["SB000001"])
+        listener._fire_event("ring", ["SB000001"])
 
         event: PushEvent = cb.call_args[0][0]
         assert event.raw["source"] == "ctpp_vip"
@@ -220,7 +220,7 @@ class TestFireEvent:
         listener = _make_listener(cb)
 
         # Should not raise
-        listener._fire_event("doorbell_ring", [])
+        listener._fire_event("ring", [])
 
 
 # ---------------------------------------------------------------------------
@@ -245,7 +245,7 @@ class TestHandleVipEvent:
         listener._handle_vip_event(self._msg(PREFIX_CALL_INIT, 0))
 
         cb.assert_called_once()
-        assert cb.call_args[0][0].event_type == "doorbell_ring"
+        assert cb.call_args[0][0].event_type == "ring"
 
     def test_vip_event_in_alerting_fires_doorbell_ring(self):
         cb = MagicMock()
@@ -254,7 +254,7 @@ class TestHandleVipEvent:
         listener._handle_vip_event(self._msg(PREFIX_VIP_EVENT, ACTION_IN_ALERTING))
 
         cb.assert_called_once()
-        assert cb.call_args[0][0].event_type == "doorbell_ring"
+        assert cb.call_args[0][0].event_type == "ring"
 
     def test_vip_event_door_opened_fires_door_opened(self):
         cb = MagicMock()
@@ -403,7 +403,7 @@ class TestProcessMessage:
         await listener._process_message(data)
 
         cb.assert_called_once()
-        assert cb.call_args[0][0].event_type == "doorbell_ring"
+        assert cb.call_args[0][0].event_type == "ring"
 
     @pytest.mark.asyncio
     async def test_in_alerting_fires_doorbell_ring(self):
@@ -414,7 +414,7 @@ class TestProcessMessage:
         await listener._process_message(data)
 
         cb.assert_called_once()
-        assert cb.call_args[0][0].event_type == "doorbell_ring"
+        assert cb.call_args[0][0].event_type == "ring"
 
     @pytest.mark.asyncio
     async def test_renewal_ack_uses_init_ts_plus_ctr_incr(self):
@@ -515,7 +515,7 @@ class TestListenLoop:
         )
 
         cb.assert_called_once()
-        assert cb.call_args[0][0].event_type == "doorbell_ring"
+        assert cb.call_args[0][0].event_type == "ring"
 
 
 # ---------------------------------------------------------------------------
