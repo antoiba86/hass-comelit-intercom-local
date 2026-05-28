@@ -305,8 +305,18 @@ class TestHandleVipEvent:
 
         cb.assert_not_called()
 
+    def test_video_event_action_zero_fires_missed_call(self):
+        """0x1840/0x0000 = call ended unanswered = missed_call."""
+        cb = MagicMock()
+        listener = _make_listener(cb)
+
+        listener._handle_vip_event(self._msg(PREFIX_VIDEO_EVENT, 0x0000))
+
+        cb.assert_called_once()
+        assert cb.call_args[0][0].event_type == "missed_call"
+
     def test_prefix_event_with_nonzero_action_does_not_fire(self):
-        """0x1840 events are call-related internals, not user-visible events."""
+        """0x1840 events with non-zero action are call-related internals, not user-visible."""
         cb = MagicMock()
         listener = _make_listener(cb)
 

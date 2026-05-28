@@ -469,6 +469,11 @@ class VipEventListener:
                     )
             return
 
+        # 0x1840/0x0000 = call ended without being answered = missed call.
+        if prefix == PREFIX_VIDEO_EVENT and action == 0:
+            self._fire_event("missed_call", addresses)
+            return
+
         # 0x1840 events are call-related but may be codec negotiation, config
         # acks, etc. Only log them for now — don't fire events.
         key = (prefix, action)

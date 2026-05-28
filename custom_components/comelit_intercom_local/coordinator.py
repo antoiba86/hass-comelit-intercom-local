@@ -94,6 +94,7 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
         # Use an insertion-ordered dict to track callbacks (value is always None).
         # This avoids ValueError on removal and preserves iteration order.
         self._push_callbacks: dict[Callable[[PushEvent], None], None] = {}
+        self._consecutive_reconnect_failures: int = 0
         # Async callbacks invoked at the top of async_stop_video, before any
         # RTSP client disconnect.  Lets the camera entity tear down HA's
         # Stream worker gracefully so its container_packets iterator ends
@@ -138,9 +139,9 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
         """
         our_addr = f"{config.apt_address}{config.apt_subaddress}"
         ctpp = await client.open_channel(
-            "CTPP", ChannelType.UAUT, extra_data=our_addr
+            "CTPP", ChannelType.CTPP, extra_data=our_addr
         )
-        await client.open_channel("CSPB", ChannelType.UAUT)
+        await client.open_channel("CSPB", ChannelType.CSPB)
         ts = int(time.time()) & 0xFFFFFFFF
         await ctpp_init_sequence(
             client, ctpp,
@@ -685,7 +686,15 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
         _LOGGER.warning("Comelit device disconnected, attempting reconnect")
         try:
             await self._reconnect()
+            self._consecutive_reconnect_failures = 0
         except Exception as err:
+            self._consecutive_reconnect_failures += 1
+            if self._consecutive_reconnect_failures < 2:
+                _LOGGER.warning(
+                    "Reconnect failed (attempt %d/2): %s — will retry",
+                    self._consecutive_reconnect_failures, err,
+                )
+                return self._config  # type: ignore[return-value]
             raise UpdateFailed(f"Reconnect failed: {err}") from err
 
         return self._config  # type: ignore[return-value]
