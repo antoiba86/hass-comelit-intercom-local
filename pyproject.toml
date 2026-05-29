@@ -53,7 +53,10 @@ max-complexity = 15
 "tests/**" = ["S101", "S106"]
 
 [tool.mypy]
-python_version = "3.11"
+# Must be >= 3.12: Home Assistant's own sources use PEP 695 type-parameter
+# syntax, which mypy can only parse when targeting 3.12+. The runtime still
+# supports 3.11 (see project.requires-python) — this only governs analysis.
+python_version = "3.13"
 ignore_missing_imports = true
 warn_unused_configs = true
 exclude = ["tests/"]
