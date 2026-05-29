@@ -31,10 +31,7 @@ async def async_setup_entry(
     if not config:
         return
 
-    entities: list[ButtonEntity] = [
-        ComelitDoorButton(coordinator, door, entry.entry_id)
-        for door in config.doors
-    ]
+    entities: list[ButtonEntity] = [ComelitDoorButton(coordinator, door, entry.entry_id) for door in config.doors]
 
     if config.doors:
         entities.append(ComelitStartVideoButton(coordinator, entry.entry_id))

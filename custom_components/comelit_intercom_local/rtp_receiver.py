@@ -17,18 +17,22 @@ _LOGGER = logging.getLogger(__name__)
 _MAX_CONSECUTIVE_ERRORS = 5
 
 
-def _build_control_packet(
-    control_req_id: int, udpm_token: int, seq: int
-) -> bytes:
+def _build_control_packet(control_req_id: int, udpm_token: int, seq: int) -> bytes:
     """Build a UDP control/keepalive packet for the video stream.
 
     From PCAP: [ICONA header with control_req_id] [token LE16] [flag] [seq] [flag] 80
     """
     header = struct.pack("<BBHH2s", 0x00, 0x06, 6, control_req_id, b"\x00\x00")
-    body = bytes([
-        udpm_token & 0xFF, (udpm_token >> 8) & 0xFF,
-        0x00, seq & 0xFF, 0x00, 0x80,
-    ])
+    body = bytes(
+        [
+            udpm_token & 0xFF,
+            (udpm_token >> 8) & 0xFF,
+            0x00,
+            seq & 0xFF,
+            0x00,
+            0x80,
+        ]
+    )
     return header + body
 
 
@@ -179,10 +183,12 @@ class RtpReceiver:
         self._send_control()
         if is_verbose_logging():
             _LOGGER.debug(
-                "UDP socket ready: local port %d -> %s:%d "
-                "(control=0x%04X, token=0x%04X)",
-                actual_port, self._host, self._port,
-                self._control_req_id, self._udpm_token,
+                "UDP socket ready: local port %d -> %s:%d (control=0x%04X, token=0x%04X)",
+                actual_port,
+                self._host,
+                self._port,
+                self._control_req_id,
+                self._udpm_token,
             )
         return actual_port
 
@@ -218,9 +224,7 @@ class RtpReceiver:
         """Send a control/keepalive packet to the device."""
         if not self._transport:
             return
-        pkt = _build_control_packet(
-            self._control_req_id, self._udpm_token, self._control_seq
-        )
+        pkt = _build_control_packet(self._control_req_id, self._udpm_token, self._control_seq)
         self._transport.sendto(pkt)
         if is_verbose_logging():
             _LOGGER.debug("Sent UDP control packet seq=%d", self._control_seq)
@@ -251,9 +255,7 @@ class RtpReceiver:
         self._tcp_media_packet_count += 1
         if self._tcp_media_packet_count == 1:
             if is_verbose_logging():
-                _LOGGER.info(
-                    "Media transport = TCP (RTPC2): first packet %d bytes", len(data)
-                )
+                _LOGGER.info("Media transport = TCP (RTPC2): first packet %d bytes", len(data))
         self._process_rtp(data)
 
     def _on_udp_packet(self, data: bytes) -> None:
@@ -266,7 +268,7 @@ class RtpReceiver:
         if req_id == self._media_req_id:
             # Strip 8-byte ICONA header AND Comelit trailer using body_len
             body_len = struct.unpack_from("<H", data, 2)[0]
-            raw_rtp = data[HEADER_SIZE:HEADER_SIZE + body_len]
+            raw_rtp = data[HEADER_SIZE : HEADER_SIZE + body_len]
 
             self._media_packet_count += 1
             self._udp_media_packet_count += 1
@@ -341,9 +343,7 @@ class RtpReceiver:
                 # All fragments of a single NAL share the same RTP timestamp,
                 # so we remember it from the first fragment.
                 reconstructed = bytes([nal_ref | frag_type])
-                self._current_fua_nal = bytearray(
-                    b"\x00\x00\x00\x01" + reconstructed + nal_data[2:]
-                )
+                self._current_fua_nal = bytearray(b"\x00\x00\x00\x01" + reconstructed + nal_data[2:])
                 self._current_fua_ts = rtp_ts
                 if frag_type == 5:
                     self._log_idr_arrival(rtp_ts)
@@ -390,14 +390,14 @@ class RtpReceiver:
         """
         now = time.monotonic()
         self._idr_count += 1
-        interval = (
-            now - self._last_idr_mono if self._last_idr_mono is not None else 0.0
-        )
+        interval = now - self._last_idr_mono if self._last_idr_mono is not None else 0.0
         self._last_idr_mono = now
         if is_verbose_logging():
             _LOGGER.debug(
                 "IDR #%d rtp_ts=0x%08X interval=%.2fs",
-                self._idr_count, rtp_ts, interval,
+                self._idr_count,
+                rtp_ts,
+                interval,
             )
 
     def _queue_nal(self, rtp_ts: int, nal_bytes: bytes) -> None:
@@ -427,14 +427,14 @@ class RtpReceiver:
 
     def _maybe_log_drops(self) -> None:
         """Log queue drop counters at most once every 5 seconds."""
-        import time as _time  # noqa: PLC0415
+        import time as _time
+
         now = _time.monotonic()
         if now - self._last_drop_log_mono < 5.0:
             return
         self._last_drop_log_mono = now
         _LOGGER.warning(
-            "Queue drops: pyav_nal=%d rtsp_nal=%d rtsp_audio=%d "
-            "(pipeline may be falling behind)",
+            "Queue drops: pyav_nal=%d rtsp_nal=%d rtsp_audio=%d (pipeline may be falling behind)",
             self._pyav_nal_drops,
             self._rtsp_nal_drops,
             self._rtsp_audio_drops,
@@ -448,9 +448,7 @@ class RtpReceiver:
         as ready to the user.
         """
         try:
-            await asyncio.wait_for(
-                self._first_video_nal_event.wait(), timeout=timeout
-            )
+            await asyncio.wait_for(self._first_video_nal_event.wait(), timeout=timeout)
             return True
         except TimeoutError:
             return False
@@ -476,16 +474,14 @@ class RtpReceiver:
 
         def _init_codec():
             """Import PyAV and create H.264 codec context (runs in thread)."""
-            import av  # noqa: PLC0415
+            import av
+
             return av, av.CodecContext.create("h264", "r")
 
         try:
             av, codec = await loop.run_in_executor(None, _init_codec)
         except ImportError:
-            _LOGGER.error(
-                "PyAV (av) not installed — cannot decode video. "
-                "Install with: pip install av"
-            )
+            _LOGGER.error("PyAV (av) not installed — cannot decode video. Install with: pip install av")
             return
 
         h264_buffer = bytearray()
@@ -501,7 +497,8 @@ class RtpReceiver:
             decoded frame. Runs blocking C calls off the event loop so the
             asyncio slow-task detector is not triggered.
             """
-            import time as _time  # noqa: PLC0415
+            import time as _time
+
             results = []
             t0 = _time.monotonic() if verbose else 0.0
             packets = codec.parse(buf)
@@ -514,8 +511,7 @@ class RtpReceiver:
                         results.append((frame.width, frame.height, jpeg))
                         if verbose:
                             _LOGGER.debug(
-                                "Decode timing: parse=%.3fs decode=%.3fs "
-                                "jpeg=%.3fs size=%d",
+                                "Decode timing: parse=%.3fs decode=%.3fs jpeg=%.3fs size=%d",
                                 t1 - t0,
                                 t2 - t1,
                                 _time.monotonic() - t2,
@@ -526,9 +522,7 @@ class RtpReceiver:
         try:
             while self._running:
                 try:
-                    _, nal = await asyncio.wait_for(
-                        self._nal_queue.get(), timeout=2.0
-                    )
+                    _, nal = await asyncio.wait_for(self._nal_queue.get(), timeout=2.0)
                 except TimeoutError:
                     if verbose and frame_count == 0:
                         _LOGGER.debug(
@@ -543,9 +537,7 @@ class RtpReceiver:
                     buf_snapshot = bytes(h264_buffer)
                     h264_buffer.clear()
                     try:
-                        decoded = await loop.run_in_executor(
-                            None, _decode_buffer_sync, buf_snapshot
-                        )
+                        decoded = await loop.run_in_executor(None, _decode_buffer_sync, buf_snapshot)
                         for w, h, jpeg_data in decoded:
                             frame_count += 1
                             self._latest_frame = jpeg_data
@@ -553,7 +545,10 @@ class RtpReceiver:
                             if verbose and (frame_count <= 5 or frame_count % 50 == 0):
                                 _LOGGER.debug(
                                     "Frame %d: %dx%d (%d bytes JPEG), queue=%d",
-                                    frame_count, w, h, len(jpeg_data),
+                                    frame_count,
+                                    w,
+                                    h,
+                                    len(jpeg_data),
                                     self._nal_queue.qsize(),
                                 )
                         consecutive_errors = 0
@@ -577,9 +572,9 @@ class RtpReceiver:
 
         _LOGGER.debug(
             "Decode loop ended: %d frames decoded, %d media packets received",
-            frame_count, self._media_packet_count,
+            frame_count,
+            self._media_packet_count,
         )
-
 
     @staticmethod
     def _frame_to_jpeg(frame) -> bytes | None:
@@ -640,10 +635,8 @@ class RtpReceiver:
         has ever been decoded) so callers always have something to show.
         """
         self._frame_event.clear()
-        try:
+        with contextlib.suppress(TimeoutError):
             await asyncio.wait_for(self._frame_event.wait(), timeout=timeout)
-        except TimeoutError:
-            pass
         return self._latest_frame
 
     @property

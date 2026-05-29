@@ -58,22 +58,23 @@ async def ctpp_init_sequence(
     await client.send_binary(channel, init_payload)
 
     fast_ack_sent = await read_response_ctpp(
-        client, channel, response_timeout,
+        client,
+        channel,
+        response_timeout,
         ack_config={"our_addr": our_addr, "apt_addr": apt_addr, "init_ts": timestamp},
     )
 
     if send_ack and not fast_ack_sent:
         ack_ts = (timestamp + _VIP_ACK_TS_INCR) & 0xFFFFFFFF
-        await client.send_binary(
-            channel, encode_call_response_ack(our_addr, apt_addr, ack_ts)
-        )
-        await client.send_binary(
-            channel, encode_call_response_ack(our_addr, apt_addr, ack_ts, prefix=0x1820)
-        )
+        await client.send_binary(channel, encode_call_response_ack(our_addr, apt_addr, ack_ts))
+        await client.send_binary(channel, encode_call_response_ack(our_addr, apt_addr, ack_ts, prefix=0x1820))
         if is_verbose_logging():
             _LOGGER.debug(
-                "CTPP ACK pair sent (init_ts=0x%08X ack_ts=0x%08X)", timestamp, ack_ts,
+                "CTPP ACK pair sent (init_ts=0x%08X ack_ts=0x%08X)",
+                timestamp,
+                ack_ts,
             )
+
 
 async def read_response_ctpp(
     client: IconaBridgeClient,
@@ -99,7 +100,11 @@ async def read_response_ctpp(
             if is_verbose_logging():
                 _LOGGER.debug(
                     "CTPP init response %d: %d bytes, prefix=0x%04X ts=0x%08X action=0x%04X",
-                    i + 1, len(resp), prefix, resp_ts, action,
+                    i + 1,
+                    len(resp),
+                    prefix,
+                    resp_ts,
+                    action,
                 )
         else:
             if is_verbose_logging():

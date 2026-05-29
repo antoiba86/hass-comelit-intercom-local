@@ -57,9 +57,7 @@ class ComelitNotificationSensor(BinarySensorEntity):
         return self._coordinator.vip_listener_active
 
     async def async_added_to_hass(self) -> None:
-        self.async_on_remove(
-            self._coordinator.add_vip_state_change_callback(self._on_vip_state_change)
-        )
+        self.async_on_remove(self._coordinator.add_vip_state_change_callback(self._on_vip_state_change))
 
     @callback
     async def _on_vip_state_change(self) -> None:

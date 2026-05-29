@@ -96,7 +96,5 @@ def _parse_config(data: dict) -> DeviceConfig:
         )
 
     if is_verbose_logging():
-        _LOGGER.info(
-            "Parsed config: %d doors, %d cameras", len(config.doors), len(config.cameras)
-        )
+        _LOGGER.info("Parsed config: %d doors, %d cameras", len(config.doors), len(config.cameras))
     return config

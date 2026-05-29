@@ -36,18 +36,32 @@ target-version = "py311"
 line-length = 120
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B", "SIM", "ASYNC", "LOG", "RUF", "TC", "PERF", "C90", "S"]
+select = ["E", "F", "I", "UP", "B", "SIM", "ASYNC", "LOG", "RUF", "TC", "PERF", "S"]
 ignore = [
     "E501",      # line-length — project uses 120-char lines
     "S101",      # assert — used as precondition guards in flow-protection code
     "S105",      # hardcoded-password-string — token/constant false positives
     "S106",      # hardcoded-password-func-arg — same
+    "S107",      # hardcoded-password-default — device default password "comelit"
     "TC001",     # typing-only-first-party-import — HA imports used at runtime
     "TC002",     # typing-only-third-party-import — same
+    "TC003",     # typing-only-stdlib-import — Callable etc. used at runtime
+    # The rules below would require rewriting verified, flow-protected code
+    # (video_call.py, client.py, rtp_receiver.py, rtsp_server.py, coordinator.py).
+    # The door-open and video-feed flows are PCAP-verified and must not be
+    # refactored for style; these are suppressed deliberately.
+    "B904",      # raise-without-from — chaining is cosmetic in the flow paths
+    "C901",      # too-complex — protocol/flow dispatch functions
+    "ASYNC109",  # timeout param — intentional public API on read/video helpers
+    "ASYNC110",  # sleep-in-while — RTSP startup gate before first packet
+    "RUF006",    # dangling-task — intentional fire-and-forget answer sequence in video_call
+    "SIM102",    # nested-if — guards are mostly verbose-logging gates
+    "RUF002",    # ambiguous docstring unicode — intentional protocol notation (×, –)
+    "RUF003",    # ambiguous comment unicode — same
 ]
 
-[tool.ruff.lint.mccabe]
-max-complexity = 15
+[tool.ruff.lint.isort]
+combine-as-imports = true
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S101", "S106"]

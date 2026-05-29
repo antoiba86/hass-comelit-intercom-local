@@ -22,6 +22,7 @@ def set_verbose_logging(enabled: bool) -> None:
     global _verbose_logging
     _verbose_logging = enabled
 
+
 DEFAULT_PORT = 64100
 DEFAULT_HTTP_PORT = 8080
 
@@ -29,4 +30,3 @@ DEFAULT_HTTP_PORT = 8080
 VIDEO_WIDTH = 800
 VIDEO_HEIGHT = 480
 VIDEO_FPS = 16
-

@@ -12,9 +12,7 @@ from .coordinator import ComelitLocalConfigEntry
 REDACT_KEYS = {"token", "password"}
 
 
-async def async_get_config_entry_diagnostics(
-    hass: HomeAssistant, entry: ComelitLocalConfigEntry
-) -> dict[str, Any]:
+async def async_get_config_entry_diagnostics(hass: HomeAssistant, entry: ComelitLocalConfigEntry) -> dict[str, Any]:
     """Return diagnostics for a config entry."""
     coordinator = entry.runtime_data
     return {
@@ -34,9 +32,7 @@ async def async_get_config_entry_diagnostics(
             "vip_listener_active": coordinator.vip_listener_active,
         },
         "video": {
-            "session_active": bool(
-                coordinator._video_session and coordinator._video_session.active
-            ),
+            "session_active": bool(coordinator._video_session and coordinator._video_session.active),
             "rtsp_url": coordinator.rtsp_url,
             "rtsp_server_running": coordinator.rtsp_server is not None,
         },
