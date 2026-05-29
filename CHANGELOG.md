@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.4.6
+
+**New features:**
+- **Diagnostics support** — download a redacted diagnostics report from the integration page (Settings → Devices & Services → Comelit → ⋮ → Download diagnostics) covering device config, connection, and video/RTSP state
+- **HACS release packaging** — releases now publish a `comelit_intercom_local.zip` asset so HACS installs/updates pull only the integration files
+
 ## 0.1.4.5
 
 > **⚠ Breaking change — doorbell event type renamed**

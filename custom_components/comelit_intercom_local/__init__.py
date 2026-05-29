@@ -9,6 +9,7 @@ from pathlib import Path
 from homeassistant.const import CONF_HOST, CONF_PORT, CONF_TOKEN, MAJOR_VERSION, MINOR_VERSION, Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
+from homeassistant.helpers import config_validation as cv
 
 from .const import CONF_VERBOSE_LOGGING, DEFAULT_PORT, DOMAIN, set_verbose_logging
 from .coordinator import ComelitLocalConfigEntry, ComelitLocalCoordinator
@@ -20,6 +21,11 @@ from .exceptions import (
 _LOGGER = logging.getLogger(__name__)
 
 PLATFORMS = [Platform.BINARY_SENSOR, Platform.BUTTON, Platform.CAMERA, Platform.EVENT]
+
+# This integration is configured exclusively via config entries (the UI config
+# flow); it accepts no YAML configuration. Declaring this schema satisfies
+# hassfest and rejects any stray YAML under the domain key.
+CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
 _CARD_URL = "/comelit_intercom_local/comelit-intercom-card.js"
 _CARD_PATH = str(Path(__file__).parent / "www" / "comelit-intercom-card.js")

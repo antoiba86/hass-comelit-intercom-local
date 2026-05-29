@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "comelit-intercom-local"
-version = "0.1.4.5"
+version = "0.1.4.6"
 description = "Home Assistant custom component for the Comelit 6701W WiFi video intercom (local ICONA Bridge protocol)."
 readme = "README.md"
 requires-python = ">=3.11"
