@@ -27,7 +27,7 @@ import time
 
 from .client import IconaBridgeClient
 from .const import is_verbose_logging
-from .ctpp import _CTR_INCR_BOTH
+from .ctpp import _VIP_ACK_TS_INCR
 from .models import DeviceConfig, PushEvent
 from .protocol import encode_call_response_ack
 
@@ -52,6 +52,21 @@ ACTION_REGISTRATION_RENEWAL = 0x0010  # Device keepalive — must ACK with 0x180
 
 # Minimum message size: prefix(2) + timestamp(4) + action(2) = 8
 MIN_MSG_SIZE = 8
+
+
+def _derive_event_ack_ts(dev_ts: int) -> int:
+    """Derive the ACK timestamp for a device-initiated VIP event.
+
+    Treating the 4-byte little-endian timestamp as raw bytes:
+        ack[0] = dev[0] ^ 0x80   (direction bit)
+        ack[1] = dev[1]
+        ack[2] = dev[3]          (echo dev's view of phone seq)
+        ack[3] = dev[2] + 1      (next expected dev seq, mod 256)
+    """
+    b = bytearray(dev_ts.to_bytes(4, "little"))
+    b[0] ^= 0x80
+    b[2], b[3] = b[3], (b[2] + 1) & 0xFF
+    return int.from_bytes(b, "little")
 
 
 def parse_ctpp_message(data: bytes) -> dict | None:
@@ -112,11 +127,11 @@ class VipEventListener:
         self._config = config
         self._callback = callback
         # init_ts is the LE32 counter the coordinator sent in encode_ctpp_init.
-        # All outgoing ACKs on this channel must use `init_ts + 0x01010000`
+        # All outgoing ACKs on this channel must use `init_ts + _VIP_ACK_TS_INCR`
         # (PCAP-verified: client never derives ACK ts from the device's
         # renewal ts — using device_ts causes the device to reject the ACK).
         self._init_ts = init_ts
-        self._ack_ts = (init_ts + _CTR_INCR_BOTH) & 0xFFFFFFFF
+        self._ack_ts = (init_ts + _VIP_ACK_TS_INCR) & 0xFFFFFFFF
         self._task: asyncio.Task | None = None
         self._running = False
         # Timestamp of the last fired event per type — used to deduplicate
@@ -129,6 +144,12 @@ class VipEventListener:
         # previous ACK was not accepted.
         self._last_seen_ts: dict[tuple[int, int], tuple[int, float]] = {}
         self._retransmit_window: float = 10.0  # seconds
+        # Counts (prefix, action) pairs that reached no handler — useful for
+        # detecting firmware changes or unimplemented event types.
+        self.decode_misses: dict[tuple[int, int], int] = {}
+        # Number of times the listener loop has restarted after an unhandled
+        # exception — surface this for diagnostics.
+        self.restart_count: int = 0
 
     async def start(self) -> None:
         """Attach to the existing CTPP channel and start the listener task.
@@ -169,17 +190,43 @@ class VipEventListener:
         await self.stop_task()
 
     async def _listen_loop(self) -> None:
-        """Read binary messages from the CTPP channel and dispatch events."""
-        queue = self._channel.response_queue
+        """Read binary messages from the CTPP channel and dispatch events.
+
+        Supervisor: auto-restarts after unhandled exceptions, up to 5 times
+        in 60 seconds, then re-raises so the coordinator can reconnect.
+        """
+        _RESTART_LIMIT = 5
+        _RESTART_WINDOW = 60.0
+        restart_times: list[float] = []
+
         while self._running:
             try:
-                data = await asyncio.wait_for(queue.get(), timeout=60.0)
-            except TimeoutError:
-                continue
+                queue = self._channel.response_queue
+                while self._running:
+                    try:
+                        data = await asyncio.wait_for(queue.get(), timeout=60.0)
+                    except TimeoutError:
+                        continue
+                    await self._process_message(data)
             except asyncio.CancelledError:
-                break
-
-            await self._process_message(data)
+                raise
+            except Exception:
+                now = time.time()
+                restart_times = [t for t in restart_times if now - t < _RESTART_WINDOW]
+                restart_times.append(now)
+                self.restart_count += 1
+                _LOGGER.error(
+                    "VIP listener loop crashed (restart #%d, %d in %.0fs window)",
+                    self.restart_count, len(restart_times), _RESTART_WINDOW,
+                    exc_info=True,
+                )
+                if len(restart_times) > _RESTART_LIMIT:
+                    _LOGGER.error(
+                        "VIP listener exceeded %d restarts in %ds — escalating to coordinator",
+                        _RESTART_LIMIT, int(_RESTART_WINDOW),
+                    )
+                    raise
+                await asyncio.sleep(1)
 
     async def _process_message(self, data: bytes) -> None:
         """Parse and dispatch a binary CTPP message."""
@@ -217,14 +264,18 @@ class VipEventListener:
         _is_real_vip = prefix == PREFIX_CALL_INIT or (
             prefix == PREFIX_VIP_EVENT and action not in (0x0000, ACTION_CALL_TERMINATED)
         )
-        # 0x1840 retransmits after video stops are expected — we don't ACK them
-        # (no valid counter) so the device retransmits briefly then stops on its own.
-        _is_video_tail = prefix == PREFIX_VIDEO_EVENT
+        # Retransmits we expect and don't warn about:
+        # - 0x1840 video tail (no valid counter to ACK after video stops)
+        # - 0x1860/0x0003 (intentionally not ACK'd; see ACK branch below)
+        _is_expected_retransmit = (
+            prefix == PREFIX_VIDEO_EVENT
+            or (prefix == PREFIX_VIP_EVENT and action == ACTION_DOOR_OPENED)
+        )
         if is_retransmit:
-            if _is_video_tail:
+            if _is_expected_retransmit:
                 if is_verbose_logging():
                     _LOGGER.debug(
-                        "VIP: expected video-tail retransmit ignored "
+                        "VIP: expected retransmit ignored "
                         "(prefix=0x%04X action=0x%04X ts=0x%08X)",
                         prefix, action, ts,
                     )
@@ -297,20 +348,21 @@ class VipEventListener:
     async def _send_event_ack(self, msg: dict) -> None:
         """Send a single ACK (0x1800) for a device-initiated VIP event.
 
-        Used for events like door_opened (0x1860/0x0003) where the device
-        expects acknowledgment to clear the channel state. Without it the
-        device stays "busy" for a few seconds, blocking subsequent rings.
+        Without this ACK the device retransmits the event and its CTPP
+        state stays in "alerting", blocking subsequent door opens.
 
-        Timestamp is `init_ts + 0x01010000` — see __init__ docstring.
+        ACK timestamp is derived from the device's event timestamp via
+        `_derive_event_ack_ts`. Target address is `apt_address`; caller
+        is `apt_address + apt_subaddress`.
         """
         apt_addr = self._config.apt_address
         apt_sub = self._config.apt_subaddress
         vip_address = f"{apt_addr}{apt_sub}"
-        entrance_addr = msg["addresses"][0] if msg["addresses"] else apt_addr
+        ack_ts = _derive_event_ack_ts(msg["timestamp"])
         try:
             await self._client.send_binary(
                 self._channel,
-                encode_call_response_ack(vip_address, entrance_addr, self._ack_ts),
+                encode_call_response_ack(vip_address, apt_addr, ack_ts),
             )
             if is_verbose_logging():
                 _LOGGER.debug(
@@ -363,7 +415,7 @@ class VipEventListener:
                     action,
                     addresses,
                 )
-            self._fire_event("doorbell_ring", addresses)
+            self._fire_event("ring", addresses)
             return
 
         # 0x1860 = VIP FSM event. Action encodes the event subtype — see ACTION_* constants.
@@ -377,13 +429,27 @@ class VipEventListener:
                 )
             if action == ACTION_IN_ALERTING:
                 # IN_ALERTING: someone rang the doorbell
-                self._fire_event("doorbell_ring", addresses)
+                self._fire_event("ring", addresses)
             elif action == ACTION_CONNECTED:
                 # CONNECTED: call was answered
                 pass
             elif action == ACTION_DOOR_OPENED:
-                # OUT_INITIATED / door opened (confirmed by testing)
-                self._fire_event("door_opened", addresses)
+                # 0x1860/0x0003 fires in two distinct cases:
+                # - Real door open: caller (addresses[0]) is an entrance
+                #   address (e.g. SB100001), echoing which entrance opened
+                # - Apartment-side FSM transition after a missed/abandoned
+                #   ring: caller is the apartment's own bare address (e.g.
+                #   SB000006), no entrance involved
+                # Only fire door_opened in the first case.
+                caller = addresses[0] if addresses else ""
+                if caller and caller == self._config.apt_address:
+                    if is_verbose_logging():
+                        _LOGGER.debug(
+                            "VIP FSM 0x0003 ignored (apartment-internal, addrs=%s)",
+                            addresses,
+                        )
+                else:
+                    self._fire_event("door_opened", addresses)
             elif action == ACTION_OUT_ALERTING:
                 # OUT_ALERTING: outgoing call is ringing
                 pass
@@ -394,20 +460,28 @@ class VipEventListener:
                 # IDLE: device returned to idle state
                 pass
             else:
+                key = (prefix, action)
+                self.decode_misses[key] = self.decode_misses.get(key, 0) + 1
                 if is_verbose_logging():
                     _LOGGER.debug(
-                        "VIP FSM event ignored (unknown action=0x%04X)", action
+                        "VIP FSM event ignored (unknown action=0x%04X, miss_count=%d)",
+                        action, self.decode_misses[key],
                     )
+            return
+
+        # 0x1840/0x0000 = call ended without being answered = missed call.
+        if prefix == PREFIX_VIDEO_EVENT and action == 0:
+            self._fire_event("missed_call", addresses)
             return
 
         # 0x1840 events are call-related but may be codec negotiation, config
         # acks, etc. Only log them for now — don't fire events.
+        key = (prefix, action)
+        self.decode_misses[key] = self.decode_misses.get(key, 0) + 1
         if is_verbose_logging():
             _LOGGER.debug(
-                "VIP event (not doorbell): prefix=0x%04X action=0x%04X addrs=%s",
-                prefix,
-                action,
-                addresses,
+                "VIP event (not doorbell): prefix=0x%04X action=0x%04X addrs=%s (miss_count=%d)",
+                prefix, action, addresses, self.decode_misses[key],
             )
 
     def _fire_event(self, event_type: str, addresses: list[str]) -> None:

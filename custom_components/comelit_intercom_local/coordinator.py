@@ -21,6 +21,7 @@ from .config_reader import get_device_config
 from .const import CONF_ENABLE_NOTIFICATIONS, DOMAIN, is_verbose_logging
 from .ctpp import ctpp_init_sequence
 from .door import open_door
+from .exceptions import ConnectionComelitError
 from .models import DeviceConfig, Door, PushEvent
 from .push import register_push, send_push_keepalive
 from .rtsp_server import LocalRtspServer
@@ -93,6 +94,7 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
         # Use an insertion-ordered dict to track callbacks (value is always None).
         # This avoids ValueError on removal and preserves iteration order.
         self._push_callbacks: dict[Callable[[PushEvent], None], None] = {}
+        self._consecutive_reconnect_failures: int = 0
         # Async callbacks invoked at the top of async_stop_video, before any
         # RTSP client disconnect.  Lets the camera entity tear down HA's
         # Stream worker gracefully so its container_packets iterator ends
@@ -105,6 +107,9 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
         # — without it, picture-entity locks to the transport it picked
         # at first stream_source() call and never upgrades from MJPEG.
         self._on_video_state_change: dict[Callable[[], Awaitable[None]], None] = {}
+        # Async callbacks invoked whenever the VIP event listener starts or stops.
+        # The notification binary sensor uses this to update its state.
+        self._on_vip_state_change: dict[Callable[[], Awaitable[None]], None] = {}
 
     @property
     def device_config(self) -> DeviceConfig | None:
@@ -134,9 +139,9 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
         """
         our_addr = f"{config.apt_address}{config.apt_subaddress}"
         ctpp = await client.open_channel(
-            "CTPP", ChannelType.UAUT, extra_data=our_addr
+            "CTPP", ChannelType.CTPP, extra_data=our_addr
         )
-        await client.open_channel("CSPB", ChannelType.UAUT)
+        await client.open_channel("CSPB", ChannelType.CSPB)
         ts = int(time.time()) & 0xFFFFFFFF
         await ctpp_init_sequence(
             client, ctpp,
@@ -177,6 +182,7 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
                 )
                 await vip.start()
                 self._vip_listener = vip
+                await self._notify_vip_state_change()
             except Exception:
                 _LOGGER.warning("Failed to start VIP event listener", exc_info=True)
         else:
@@ -221,6 +227,7 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
             with contextlib.suppress(Exception):
                 await self._vip_listener.stop()
             self._vip_listener = None
+            await self._notify_vip_state_change()
 
         old_client = self._client
         self._client = None
@@ -233,7 +240,16 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
 
         client = IconaBridgeClient(self.host, self.port)
         try:
-            await client.connect()
+            # Retry connect() on ECONNREFUSED — device may not have rejoined WiFi yet
+            # after waking from idle sleep. 4 attempts, 0.3s apart (≤1.15s total).
+            for _attempt in range(4):
+                try:
+                    await client.connect()
+                    break
+                except (ConnectionRefusedError, ConnectionComelitError):
+                    if _attempt >= 3:
+                        raise
+                    await asyncio.sleep(0.3)
             await authenticate(client, self.token)
             self._config = await get_device_config(client)
             await register_push(client, self._config, self._on_push_event)
@@ -254,6 +270,7 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
                 )
                 await vip.start()
                 self._vip_listener = vip
+                await self._notify_vip_state_change()
             except Exception:
                 _LOGGER.warning("Failed to start VIP listener on reconnect", exc_info=True)
 
@@ -319,6 +336,44 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
             except Exception:
                 _LOGGER.exception("Error in video state change callback")
 
+    @property
+    def vip_listener_active(self) -> bool:
+        """Return True when the VIP event listener is running."""
+        return self._vip_listener is not None
+
+    @property
+    def notifications_enabled(self) -> bool:
+        """Return True when push notifications are enabled in options."""
+        return self.config_entry.options.get(CONF_ENABLE_NOTIFICATIONS, True)
+
+    def add_vip_state_change_callback(
+        self, callback: Callable[[], Awaitable[None]]
+    ) -> Callable[[], None]:
+        """Register an async callback invoked when the VIP listener starts or stops."""
+        self._on_vip_state_change[callback] = None
+
+        def _remove() -> None:
+            self._on_vip_state_change.pop(callback, None)
+
+        return _remove
+
+    async def _notify_vip_state_change(self) -> None:
+        """Fire all registered VIP state-change callbacks."""
+        for cb in list(self._on_vip_state_change):
+            try:
+                await cb()
+            except Exception:
+                _LOGGER.exception("Error in VIP state change callback")
+
+    async def async_restart_notifications(self) -> None:
+        """Stop and restart the VIP event listener."""
+        if self._vip_listener:
+            with contextlib.suppress(Exception):
+                await self._vip_listener.stop()
+            self._vip_listener = None
+            await self._notify_vip_state_change()
+        await self._ensure_vip_listener()
+
     def _on_push_event(self, event: PushEvent) -> None:
         """Dispatch a push event to all registered callbacks."""
         for cb in list(self._push_callbacks):
@@ -345,7 +400,8 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
             our_addr = f"{self._config.apt_address}{self._config.apt_subaddress}"
             entrance_addr = self._config.caller_address or our_addr
             await self._video_session.async_open_door_on_ctpp(
-                our_addr, entrance_addr, door.output_index
+                our_addr, entrance_addr, door.output_index,
+                apt_addr=self._config.apt_address,
             )
         else:
             await open_door(self.host, self.port, self.token, self._client, self._config, door)
@@ -415,6 +471,7 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
                 with contextlib.suppress(Exception):
                     await self._vip_listener.stop_task()
                 self._vip_listener = None
+                await self._notify_vip_state_change()
 
             t0 = time.monotonic()
             if is_verbose_logging():
@@ -583,19 +640,23 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
             except Exception:
                 _LOGGER.exception("Error in stop-video callback")
 
-        await session.stop(reason="user stopped")
-        # Block future PLAYs until the next session is ready, and
-        # kick any remaining RTSP clients (e.g. go2rtc) so they
-        # reconnect fresh against a stream that already has video.
-        if self._rtsp_server:
-            self._rtsp_server.mark_not_ready()
-            self._rtsp_server.disconnect_clients()
-        # Restart VIP listener now that video released the CTPP slot.
-        # Skip if we're inside async_start_video (lock already held) —
-        # start_video will stop VIP again immediately anyway.
-        if not self._video_start_lock.locked():
-            await self._ensure_vip_listener()
-        await self._notify_video_state_change()
+        try:
+            await session.stop(reason="user stopped")
+        finally:
+            # Block future PLAYs until the next session is ready, and
+            # kick any remaining RTSP clients (e.g. go2rtc) so they
+            # reconnect fresh against a stream that already has video.
+            if self._rtsp_server:
+                self._rtsp_server.mark_not_ready()
+                self._rtsp_server.disconnect_clients()
+            # Restart VIP listener now that video released the CTPP slot.
+            # Finally-guarded so teardown exceptions don't leave the listener
+            # permanently paused — it would stay deaf until coordinator reconnect.
+            # Skip if we're inside async_start_video (lock already held) —
+            # start_video will stop VIP again immediately anyway.
+            if not self._video_start_lock.locked():
+                await self._ensure_vip_listener()
+            await self._notify_video_state_change()
 
     @property
     def video_session(self) -> VideoCallSession | None:
@@ -625,7 +686,15 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
         _LOGGER.warning("Comelit device disconnected, attempting reconnect")
         try:
             await self._reconnect()
+            self._consecutive_reconnect_failures = 0
         except Exception as err:
+            self._consecutive_reconnect_failures += 1
+            if self._consecutive_reconnect_failures < 2:
+                _LOGGER.warning(
+                    "Reconnect failed (attempt %d/2): %s — will retry",
+                    self._consecutive_reconnect_failures, err,
+                )
+                return self._config  # type: ignore[return-value]
             raise UpdateFailed(f"Reconnect failed: {err}") from err
 
         return self._config  # type: ignore[return-value]

@@ -49,6 +49,7 @@ def _make_coordinator(*, with_client: bool = False) -> ComelitLocalCoordinator:
     coordinator._on_stop_video = {}
     coordinator._on_video_state_change = {}
     coordinator._keepalive_task = None
+    coordinator._ctpp_init_ts = 0
     coordinator.logger = MagicMock()
     return coordinator
 
@@ -374,3 +375,152 @@ class TestAsyncOpenDoor:
 
         with pytest.raises(RuntimeError, match="Not connected"):
             await coord.async_open_door(door)
+
+
+# ---------------------------------------------------------------------------
+# Phase 2a — finally-guarded VIP listener restart in async_stop_video
+# ---------------------------------------------------------------------------
+
+
+class TestStopVideoFinally:
+    @pytest.mark.asyncio
+    async def test_vip_listener_restarted_even_if_session_stop_raises(self):
+        """VIP listener is restarted in finally even when session.stop() raises."""
+        coord = _make_coordinator(with_client=True)
+
+        mock_session = MagicMock()
+        mock_session.stop = AsyncMock(side_effect=RuntimeError("teardown failed"))
+        coord._video_session = mock_session
+
+        mock_vip = MagicMock()
+        mock_vip.start = AsyncMock()
+
+        with patch(
+            "custom_components.comelit_intercom_local.coordinator.VipEventListener",
+            return_value=mock_vip,
+        ):
+            with pytest.raises(RuntimeError, match="teardown failed"):
+                await coord.async_stop_video()
+
+        mock_vip.start.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_vip_listener_restarted_after_normal_stop(self):
+        """VIP listener is restarted after a normal (no-exception) session stop."""
+        coord = _make_coordinator(with_client=True)
+
+        mock_session = MagicMock()
+        mock_session.stop = AsyncMock()
+        coord._video_session = mock_session
+
+        mock_vip = MagicMock()
+        mock_vip.start = AsyncMock()
+
+        with patch(
+            "custom_components.comelit_intercom_local.coordinator.VipEventListener",
+            return_value=mock_vip,
+        ):
+            await coord.async_stop_video()
+
+        mock_vip.start.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
+# Phase 2b — reconnect retry loop on ECONNREFUSED
+# ---------------------------------------------------------------------------
+
+
+class TestReconnectRetry:
+    def _patch_reconnect_deps(self, mock_client):
+        """Return a context manager patching all _reconnect dependencies."""
+        return (
+            patch(
+                "custom_components.comelit_intercom_local.coordinator.IconaBridgeClient",
+                return_value=mock_client,
+            ),
+            patch(
+                "custom_components.comelit_intercom_local.coordinator.authenticate",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "custom_components.comelit_intercom_local.coordinator.get_device_config",
+                new_callable=AsyncMock,
+                return_value=MagicMock(doors=[], cameras=[]),
+            ),
+            patch(
+                "custom_components.comelit_intercom_local.coordinator.register_push",
+                new_callable=AsyncMock,
+            ),
+            patch("asyncio.sleep", new_callable=AsyncMock),
+        )
+
+    @pytest.mark.asyncio
+    async def test_retries_on_connection_refused_and_succeeds(self):
+        """_reconnect retries connect() on ECONNREFUSED and succeeds on 3rd attempt."""
+        coord = _make_coordinator()
+        coord.config_entry.options = {"enable_notifications": False}
+
+        attempt = 0
+
+        async def connect_impl():
+            nonlocal attempt
+            attempt += 1
+            if attempt <= 2:
+                raise ConnectionRefusedError("ECONNREFUSED")
+
+        mock_client = MagicMock()
+        mock_client.connected = True
+        mock_client.connect = AsyncMock(side_effect=connect_impl)
+        mock_client.set_disconnect_callback = MagicMock()
+        mock_client.get_channel = MagicMock(return_value=None)
+
+        p1, p2, p3, p4, p5 = self._patch_reconnect_deps(mock_client)
+        with p1, p2, p3, p4, p5:
+            await coord._reconnect()
+
+        assert attempt == 3
+
+    @pytest.mark.asyncio
+    async def test_raises_update_failed_after_all_attempts_fail(self):
+        """_reconnect raises after exhausting all retry attempts."""
+        coord = _make_coordinator()
+        coord.config_entry.options = {"enable_notifications": False}
+
+        mock_client = MagicMock()
+        mock_client.connect = AsyncMock(side_effect=ConnectionRefusedError("ECONNREFUSED"))
+        mock_client.disconnect = AsyncMock()
+        mock_client.set_disconnect_callback = MagicMock()
+
+        p1, p2, p3, p4, p5 = self._patch_reconnect_deps(mock_client)
+        with p1, p2, p3, p4, p5:
+            with pytest.raises(ConnectionRefusedError):
+                await coord._reconnect()
+
+    @pytest.mark.asyncio
+    async def test_auth_failure_not_retried(self):
+        """Auth failures are not caught by the connect retry loop."""
+        coord = _make_coordinator()
+        coord.config_entry.options = {"enable_notifications": False}
+
+        mock_client = MagicMock()
+        mock_client.connect = AsyncMock()
+        mock_client.disconnect = AsyncMock()
+        mock_client.set_disconnect_callback = MagicMock()
+
+        p1 = patch(
+            "custom_components.comelit_intercom_local.coordinator.IconaBridgeClient",
+            return_value=mock_client,
+        )
+        p2 = patch(
+            "custom_components.comelit_intercom_local.coordinator.authenticate",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("bad token"),
+        )
+        p3 = patch("asyncio.sleep", new_callable=AsyncMock)
+
+        with p1, p2, p3:
+            with pytest.raises(RuntimeError, match="bad token"):
+                await coord._reconnect()
+
+        # connect was called exactly once (no retry for auth failures)
+        mock_client.connect.assert_awaited_once()

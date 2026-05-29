@@ -295,10 +295,11 @@ The `get-configuration` response includes:
 
 - The PUSH channel only registers an FCM token — actual call events (doorbell ring, door opened) arrive as binary messages on the persistent CTPP channel
 - `VipEventListener` opens `CTPP_VIP` + `CSPB_VIP` at startup, runs `ctpp_init_sequence`, and listens in a background task
-- The device sends a periodic registration renewal signal (`0x1860/0x0010`); the listener must ACK with `0x1800` + `0x1820` or the device stops sending events
-- Action codes: `0x18C0` (call init) and `0x1860/0x0001` (IN_ALERTING) → `doorbell_ring`; `0x1860/0x0003` → `door_opened`
+- The device sends `0x1860/0x0010` **only at CTPP init**, not periodically; the listener responds with an ACK pair (`0x1800` + `0x1820`) as part of the handshake. (Earlier versions of this doc incorrectly described it as a periodic renewal signal.)
+- Action codes: `0x18C0` (call init) and `0x1860/0x0001` (IN_ALERTING) → `doorbell_ring`; `0x1860/0x0003` (caller-dependent): entrance caller (e.g. `SB100001`) → `door_opened`, apartment caller (e.g. `SB000006`) → post-ring FSM transition (suppressed, was a false-positive)
 - Events are deduplicated within a 10s window to suppress device retransmissions
-- VIP listener is paused during video and restarted after `async_stop_video`
+- VIP listener is paused during video and restarted in a `finally` block in `async_stop_video` so teardown exceptions can't leave the listener permanently paused
+- Device disconnects are normal (random 35 s to 30+ min intervals), all clean FINs, reconnects in ~300-500 ms; `ECONNREFUSED` on rapid reconnect is handled by a brief retry loop in `_reconnect` (4 attempts, ≤1.15 s total)
 
 ### Door Control
 

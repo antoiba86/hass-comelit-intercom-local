@@ -25,6 +25,7 @@ from custom_components.comelit_intercom_local.vip_listener import (
     PREFIX_VIDEO_EVENT,
     PREFIX_VIP_EVENT,
     VipEventListener,
+    _derive_event_ack_ts,
     parse_ctpp_message,
 )
 
@@ -148,18 +149,18 @@ class TestFireEvent:
         cb = MagicMock()
         listener = _make_listener(cb)
 
-        listener._fire_event("doorbell_ring", ["SB000001"])
+        listener._fire_event("ring", ["SB000001"])
 
         cb.assert_called_once()
         event: PushEvent = cb.call_args[0][0]
-        assert event.event_type == "doorbell_ring"
+        assert event.event_type == "ring"
         assert event.apt_address == "SB000001"
 
     def test_first_address_used_as_apt_address(self):
         cb = MagicMock()
         listener = _make_listener(cb)
 
-        listener._fire_event("doorbell_ring", ["SB000001", "SB000006"])
+        listener._fire_event("ring", ["SB000001", "SB000006"])
 
         event: PushEvent = cb.call_args[0][0]
         assert event.apt_address == "SB000001"
@@ -168,7 +169,7 @@ class TestFireEvent:
         cb = MagicMock()
         listener = _make_listener(cb)
 
-        listener._fire_event("doorbell_ring", [])
+        listener._fire_event("ring", [])
 
         event: PushEvent = cb.call_args[0][0]
         assert event.apt_address == ""
@@ -178,8 +179,8 @@ class TestFireEvent:
         listener = _make_listener(cb)
         listener._dedup_window = 10.0
 
-        listener._fire_event("doorbell_ring", [])
-        listener._fire_event("doorbell_ring", [])
+        listener._fire_event("ring", [])
+        listener._fire_event("ring", [])
 
         cb.assert_called_once()
 
@@ -187,7 +188,7 @@ class TestFireEvent:
         cb = MagicMock()
         listener = _make_listener(cb)
 
-        listener._fire_event("doorbell_ring", [])
+        listener._fire_event("ring", [])
         listener._fire_event("door_opened", [])
 
         assert cb.call_count == 2
@@ -197,10 +198,10 @@ class TestFireEvent:
         listener = _make_listener(cb)
 
         # Pre-seed the last_fired time so it appears old
-        listener._last_fired["doorbell_ring"] = time.time() - 20.0
+        listener._last_fired["ring"] = time.time() - 20.0
         listener._dedup_window = 10.0
 
-        listener._fire_event("doorbell_ring", [])
+        listener._fire_event("ring", [])
 
         cb.assert_called_once()
 
@@ -208,7 +209,7 @@ class TestFireEvent:
         cb = MagicMock()
         listener = _make_listener(cb)
 
-        listener._fire_event("doorbell_ring", ["SB000001"])
+        listener._fire_event("ring", ["SB000001"])
 
         event: PushEvent = cb.call_args[0][0]
         assert event.raw["source"] == "ctpp_vip"
@@ -219,7 +220,7 @@ class TestFireEvent:
         listener = _make_listener(cb)
 
         # Should not raise
-        listener._fire_event("doorbell_ring", [])
+        listener._fire_event("ring", [])
 
 
 # ---------------------------------------------------------------------------
@@ -244,7 +245,7 @@ class TestHandleVipEvent:
         listener._handle_vip_event(self._msg(PREFIX_CALL_INIT, 0))
 
         cb.assert_called_once()
-        assert cb.call_args[0][0].event_type == "doorbell_ring"
+        assert cb.call_args[0][0].event_type == "ring"
 
     def test_vip_event_in_alerting_fires_doorbell_ring(self):
         cb = MagicMock()
@@ -253,7 +254,7 @@ class TestHandleVipEvent:
         listener._handle_vip_event(self._msg(PREFIX_VIP_EVENT, ACTION_IN_ALERTING))
 
         cb.assert_called_once()
-        assert cb.call_args[0][0].event_type == "doorbell_ring"
+        assert cb.call_args[0][0].event_type == "ring"
 
     def test_vip_event_door_opened_fires_door_opened(self):
         cb = MagicMock()
@@ -304,8 +305,18 @@ class TestHandleVipEvent:
 
         cb.assert_not_called()
 
+    def test_video_event_action_zero_fires_missed_call(self):
+        """0x1840/0x0000 = call ended unanswered = missed_call."""
+        cb = MagicMock()
+        listener = _make_listener(cb)
+
+        listener._handle_vip_event(self._msg(PREFIX_VIDEO_EVENT, 0x0000))
+
+        cb.assert_called_once()
+        assert cb.call_args[0][0].event_type == "missed_call"
+
     def test_prefix_event_with_nonzero_action_does_not_fire(self):
-        """0x1840 events are call-related internals, not user-visible events."""
+        """0x1840 events with non-zero action are call-related internals, not user-visible."""
         cb = MagicMock()
         listener = _make_listener(cb)
 
@@ -355,9 +366,10 @@ class TestProcessMessage:
         cb = MagicMock()
         listener = _make_listener(cb)
 
+        # Real door open: caller is an entrance address, NOT the apartment
         data = _make_ctpp_msg(
             PREFIX_VIP_EVENT, 0x12345678, ACTION_DOOR_OPENED, flags=0,
-            addresses=["SB000006"]
+            addresses=["SB100001", "SB0000061"],
         )
         await listener._process_message(data)
 
@@ -370,6 +382,29 @@ class TestProcessMessage:
         listener._client.send_binary.assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_door_opened_apartment_internal_does_not_fire(self):
+        """0x1860/0x0003 with apt_address as caller is an FSM transition
+        after a missed/abandoned ring, not a real door open.
+
+        Real door opens carry an entrance address (e.g. SB100001) as caller.
+        Apartment-internal transitions carry the apartment's own bare
+        address (e.g. SB000006). Without this filter, missed doorbells
+        would falsely fire door_opened ~10s after the ring.
+        """
+        cb = MagicMock()
+        listener = _make_listener(cb, apt_address="SB000006")
+
+        # Apartment-internal: caller is the apartment's bare address
+        data = _make_ctpp_msg(
+            PREFIX_VIP_EVENT, 0x12345678, ACTION_DOOR_OPENED, flags=0,
+            addresses=["SB000006", "SB0000061"],
+        )
+        await listener._process_message(data)
+
+        cb.assert_not_called()
+        listener._client.send_binary.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_call_init_fires_doorbell_ring(self):
         cb = MagicMock()
         listener = _make_listener(cb)
@@ -378,7 +413,7 @@ class TestProcessMessage:
         await listener._process_message(data)
 
         cb.assert_called_once()
-        assert cb.call_args[0][0].event_type == "doorbell_ring"
+        assert cb.call_args[0][0].event_type == "ring"
 
     @pytest.mark.asyncio
     async def test_in_alerting_fires_doorbell_ring(self):
@@ -389,11 +424,11 @@ class TestProcessMessage:
         await listener._process_message(data)
 
         cb.assert_called_once()
-        assert cb.call_args[0][0].event_type == "doorbell_ring"
+        assert cb.call_args[0][0].event_type == "ring"
 
     @pytest.mark.asyncio
     async def test_renewal_ack_uses_init_ts_plus_ctr_incr(self):
-        """Renewal ACK timestamp must be init_ts + 0x01010000 — PCAP-verified.
+        """Renewal ACK timestamp must be init_ts + _VIP_ACK_TS_INCR (0x01000000) — PCAP-verified.
 
         The client derives outgoing ACK timestamps from its OWN init_ts, not
         from the device's renewal timestamp. Using the device ts causes the
@@ -418,7 +453,7 @@ class TestProcessMessage:
         await listener._process_message(data)
 
         assert len(sent_payloads) == 2
-        expected_ts = (init_ts + 0x01010000) & 0xFFFFFFFF
+        expected_ts = (init_ts + 0x01000000) & 0xFFFFFFFF
         for payload in sent_payloads:
             actual_ts = struct.unpack_from("<I", payload, 2)[0]
             assert actual_ts == expected_ts
@@ -490,4 +525,154 @@ class TestListenLoop:
         )
 
         cb.assert_called_once()
-        assert cb.call_args[0][0].event_type == "doorbell_ring"
+        assert cb.call_args[0][0].event_type == "ring"
+
+
+# ---------------------------------------------------------------------------
+# VipEventListener.decode_misses — Phase 1a observability
+# ---------------------------------------------------------------------------
+
+
+class TestDecodeMisses:
+    @pytest.mark.asyncio
+    async def test_unknown_vip_action_increments_decode_miss(self):
+        """Unknown action code in VIP event increments decode_misses counter."""
+        listener = _make_listener()
+
+        data = _make_ctpp_msg(PREFIX_VIP_EVENT, 0x12345678, 0xFFFF, flags=0)
+        await listener._process_message(data)
+
+        assert listener.decode_misses.get((PREFIX_VIP_EVENT, 0xFFFF), 0) == 1
+
+    @pytest.mark.asyncio
+    async def test_video_event_increments_decode_miss(self):
+        """0x1840 events (call-related internals) are counted as decode misses."""
+        listener = _make_listener()
+
+        data = _make_ctpp_msg(PREFIX_VIDEO_EVENT, 0, 0x0099, flags=0)
+        await listener._process_message(data)
+
+        assert listener.decode_misses.get((PREFIX_VIDEO_EVENT, 0x0099), 0) == 1
+
+    @pytest.mark.asyncio
+    async def test_decode_miss_counter_accumulates(self):
+        """Repeated unknown events accumulate in the counter."""
+        listener = _make_listener()
+
+        data = _make_ctpp_msg(PREFIX_VIP_EVENT, 0, 0xAAAA, flags=0)
+        await listener._process_message(data)
+        await listener._process_message(data)
+
+        assert listener.decode_misses.get((PREFIX_VIP_EVENT, 0xAAAA), 0) == 2
+
+    @pytest.mark.asyncio
+    async def test_known_events_do_not_increment_decode_miss(self):
+        """Known handled events (doorbell ring, door opened) don't count as misses."""
+        cb = MagicMock()
+        listener = _make_listener(cb)
+
+        data = _make_ctpp_msg(PREFIX_CALL_INIT, 0xABCD, 0, flags=0)
+        await listener._process_message(data)
+
+        assert not listener.decode_misses
+
+
+# ---------------------------------------------------------------------------
+# VipEventListener._listen_loop supervisor — Phase 1b
+# ---------------------------------------------------------------------------
+
+
+class TestListenLoopSupervisor:
+    @pytest.mark.asyncio
+    async def test_restarts_after_single_exception(self):
+        """One-shot exception in the read loop restarts it and increments restart_count."""
+        cb = MagicMock()
+        listener = _make_listener(cb)
+        listener._running = True
+        call_count = 0
+
+        async def failing_process(data):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise RuntimeError("transient")
+            listener._running = False
+
+        listener._process_message = failing_process
+
+        data = _make_ctpp_msg(PREFIX_VIP_EVENT, 0, ACTION_IN_ALERTING, flags=0)
+        await listener._channel.response_queue.put(data)
+        await listener._channel.response_queue.put(data)
+
+        async def mock_sleep(t):
+            pass  # no-op, but _running=False set in failing_process on next call
+
+        with patch("asyncio.sleep", side_effect=mock_sleep):
+            await listener._listen_loop()
+
+        assert listener.restart_count == 1
+
+    @pytest.mark.asyncio
+    async def test_escalates_after_too_many_restarts(self):
+        """More than 5 restarts in 60 s re-raises so the coordinator can reconnect."""
+        listener = _make_listener()
+        listener._running = True
+
+        async def always_fail(data):
+            raise RuntimeError("persistent")
+
+        listener._process_message = always_fail
+
+        data = _make_ctpp_msg(PREFIX_VIP_EVENT, 0, 0, flags=0)
+        for _ in range(10):
+            await listener._channel.response_queue.put(data)
+
+        with patch("asyncio.sleep", new_callable=AsyncMock):
+            with pytest.raises(RuntimeError, match="persistent"):
+                await listener._listen_loop()
+
+        assert listener.restart_count > 5
+
+    @pytest.mark.asyncio
+    async def test_cancelled_error_propagates_without_restart(self):
+        """CancelledError is not treated as a loop crash — it propagates directly."""
+        listener = _make_listener()
+        listener._running = True
+
+        async def cancel_on_get():
+            raise asyncio.CancelledError()
+
+        listener._channel.response_queue.get = cancel_on_get
+
+        with pytest.raises(asyncio.CancelledError):
+            await listener._listen_loop()
+
+        assert listener.restart_count == 0
+
+
+# ---------------------------------------------------------------------------
+# Event ACK timestamp derivation
+# ---------------------------------------------------------------------------
+
+
+class TestDeriveEventAckTs:
+    """Pinned dev-event → phone-ACK pairs from a clean wire trace."""
+
+    @pytest.mark.parametrize(
+        "dev_bytes, ack_bytes",
+        [
+            (b"\x64\x00\xd8\x6a", b"\xe4\x00\x6a\xd9"),  # call-init 0x18C0/0x0029
+            (b"\xd6\xb9\xd1\xf1", b"\x56\xb9\xf1\xd2"),  # renewal 0x1860/0x0010
+            (b"\x64\x00\xd9\x6a", b"\xe4\x00\x6a\xda"),  # video event 0x1840/0x0008
+            (b"\x64\x00\xd9\x6b", b"\xe4\x00\x6b\xda"),  # device ACK
+        ],
+    )
+    def test_pinned_pairs(self, dev_bytes, ack_bytes):
+        dev_ts = int.from_bytes(dev_bytes, "little")
+        expected = int.from_bytes(ack_bytes, "little")
+        assert _derive_event_ack_ts(dev_ts) == expected
+
+    def test_byte2_plus_1_wraps_at_ff(self):
+        dev_ts = int.from_bytes(b"\x00\x00\xff\x00", "little")
+        ack = _derive_event_ack_ts(dev_ts)
+        assert ack.to_bytes(4, "little") == b"\x80\x00\x00\x00"

@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, call
 import pytest
 
 from custom_components.comelit_intercom_local.ctpp import (
-    _CTR_INCR_BOTH,
+    _VIP_ACK_TS_INCR,
     ctpp_init_sequence,
 )
 
@@ -21,9 +21,9 @@ def _make_client(responses: list) -> MagicMock:
     return client
 
 
-class TestCtrIncrBoth:
+class TestVipAckTsIncr:
     def test_value(self):
-        assert _CTR_INCR_BOTH == 0x01010000
+        assert _VIP_ACK_TS_INCR == 0x01000000
 
 
 class TestCtppInitSequence:
@@ -74,7 +74,7 @@ class TestCtppInitSequence:
 
     @pytest.mark.asyncio
     async def test_ack_timestamp_is_init_ts_plus_ctr_incr(self):
-        """ACK timestamp must be (init_ts + _CTR_INCR_BOTH) & 0xFFFFFFFF."""
+        """ACK timestamp must be (init_ts + _VIP_ACK_TS_INCR) & 0xFFFFFFFF."""
         init_ts = 0x12000000
         resp = b"\x00\x18" + struct.pack("<I", 0) + struct.pack(">H", 0)
         client = _make_client([resp, resp])
@@ -85,7 +85,7 @@ class TestCtppInitSequence:
 
         await ctpp_init_sequence(client, channel, "SB000006", 1, "SB0000061", init_ts)
 
-        expected_ts = (init_ts + _CTR_INCR_BOTH) & 0xFFFFFFFF
+        expected_ts = (init_ts + _VIP_ACK_TS_INCR) & 0xFFFFFFFF
         # The ACK messages are encode_call_response_ack; check LE32 at offset 2
         for ack in sent[-2:]:
             actual_ts = struct.unpack_from("<I", ack, 2)[0]
@@ -116,7 +116,7 @@ class TestCtppInitSequence:
 
         await ctpp_init_sequence(client, channel, "SB000006", 1, "SB0000061", init_ts)
 
-        expected_ts = (init_ts + _CTR_INCR_BOTH) & 0xFFFFFFFF
+        expected_ts = (init_ts + _VIP_ACK_TS_INCR) & 0xFFFFFFFF
         for ack in sent[-2:]:
             actual_ts = struct.unpack_from("<I", ack, 2)[0]
             assert actual_ts == expected_ts
@@ -149,3 +149,44 @@ class TestCtppInitSequence:
         )
 
         assert client.read_response.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_fast_ack_uses_init_ts_not_device_ts(self):
+        """When 0x1860 is seen, ACK timestamp must use init_ts + _VIP_ACK_TS_INCR (not device ts)."""
+        init_ts = 0x12000000
+        device_ts = 0xDEADBEEF  # deliberately different to catch wrong formula
+        # 0x1860 prefix LE16 + device_ts LE32 + action BE16
+        resp_1860 = struct.pack("<H", 0x1860) + struct.pack("<I", device_ts) + struct.pack(">H", 0x0010)
+        client = _make_client([resp_1860, None])
+        channel = MagicMock()
+
+        sent: list[bytes] = []
+        client.send_binary = AsyncMock(side_effect=lambda ch, data: sent.append(data))
+
+        await ctpp_init_sequence(client, channel, "SB000006", 1, "SB0000061", init_ts)
+
+        expected_ts = (init_ts + _VIP_ACK_TS_INCR) & 0xFFFFFFFF
+        # ACK messages are the 2nd and 3rd sends (1st is ctpp_init)
+        for ack in sent[1:3]:
+            actual_ts = struct.unpack_from("<I", ack, 2)[0]
+            assert actual_ts == expected_ts, (
+                f"ACK ts 0x{actual_ts:08X} should be init_ts+CTR (0x{expected_ts:08X}), "
+                f"not device_ts-derived"
+            )
+
+    @pytest.mark.asyncio
+    async def test_fast_ack_prevents_double_ack(self):
+        """When 0x1860 triggers the fast ACK, no second ACK pair must be sent."""
+        init_ts = 0x12000000
+        device_ts = 0xDEADBEEF
+        resp_1860 = struct.pack("<H", 0x1860) + struct.pack("<I", device_ts) + struct.pack(">H", 0x0010)
+        client = _make_client([resp_1860, None])
+        channel = MagicMock()
+
+        sent: list[bytes] = []
+        client.send_binary = AsyncMock(side_effect=lambda ch, data: sent.append(data))
+
+        await ctpp_init_sequence(client, channel, "SB000006", 1, "SB0000061", init_ts)
+
+        # 1 init + 2 ACKs = exactly 3; no extra ACK pair from ctpp_init_sequence
+        assert len(sent) == 3

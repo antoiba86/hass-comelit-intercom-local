@@ -16,13 +16,16 @@ from .protocol import encode_call_response_ack, encode_ctpp_init
 
 _LOGGER = logging.getLogger(__name__)
 
-# Both sub-counters increment by 1 (bytes[4] and bytes[5] of the CTPP body).
-# Used to compute the ACK timestamp offset from the init timestamp.
-# Value matches PCAP-verified video session analysis (_CTR_INCR_BOTH in video_call.py).
-_CTR_INCR_BOTH = 0x01010000
+# Only the high sub-counter increments (byte[4] of the LE32 timestamp).
+# Used to compute the ACK timestamp offset for VIP CTPP channels (doorbell listener).
+# Note: video sessions use 0x01010000 (both sub-counters) — see video_call.py.
+_VIP_ACK_TS_INCR = 0x01000000
 
 # Minimum response length: prefix(2) + timestamp(4) + action(2) = 8 bytes.
 _CTPP_RESPONSE_MIN_LEN = 8
+
+# Prefix for VIP event messages (device → client).
+_PREFIX_VIP_EVENT = 0x1860
 
 
 async def ctpp_init_sequence(
@@ -54,10 +57,13 @@ async def ctpp_init_sequence(
     init_payload = encode_ctpp_init(apt_addr, apt_sub, timestamp)
     await client.send_binary(channel, init_payload)
 
-    await read_response_ctpp(client, channel, response_timeout)
+    fast_ack_sent = await read_response_ctpp(
+        client, channel, response_timeout,
+        ack_config={"our_addr": our_addr, "apt_addr": apt_addr, "init_ts": timestamp},
+    )
 
-    if send_ack:
-        ack_ts = (timestamp + _CTR_INCR_BOTH) & 0xFFFFFFFF
+    if send_ack and not fast_ack_sent:
+        ack_ts = (timestamp + _VIP_ACK_TS_INCR) & 0xFFFFFFFF
         await client.send_binary(
             channel, encode_call_response_ack(our_addr, apt_addr, ack_ts)
         )
@@ -73,9 +79,17 @@ async def read_response_ctpp(
     client: IconaBridgeClient,
     channel: Channel,
     response_timeout: float = 5.0,
-) -> None:
-    # Drain device's two responses (0x1800 ACK + 0x1860/0x0010 renewal request).
-    # We don't use the device's timestamp to compute our ACK — see docstring.
+    ack_config: dict | None = None,
+) -> bool:
+    """Drain up to 2 device responses after CTPP init.
+
+    The device typically sends [0x1800 init ACK][0x1860 initial-burst renewal]
+    in quick succession. If a renewal (0x1860) is seen, send the ACK pair
+    immediately using init_ts + _VIP_ACK_TS_INCR (PCAP-verified: ACK timestamp
+    must be derived from our init timestamp, never from the device's timestamp).
+
+    Returns True if the ACK pair was sent (caller must not send it again).
+    """
     for i in range(2):
         resp = await client.read_response(channel, timeout=response_timeout)
         if resp and len(resp) >= _CTPP_RESPONSE_MIN_LEN:

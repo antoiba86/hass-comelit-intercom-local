@@ -19,6 +19,7 @@ from custom_components.comelit_intercom_local.protocol import (
     encode_channel_open,
     encode_ctpp_init,
     encode_door_init,
+    encode_door_open_during_video,
     encode_hangup,
     encode_header,
     encode_json_message,
@@ -323,3 +324,38 @@ class TestAnswerSequencePayloads:
         ts = 0xCAFEBABE
         msg = encode_hangup("SB0000061", "SB100001", ts)
         assert struct.pack("<I", ts) in msg
+
+
+class TestDoorOpenDuringVideo:
+    """Pinned bytes from notification+opendoorwhilevideo.pcap frame 450."""
+
+    def test_matches_pcap_frame_450(self):
+        # Frame 450 body (48 bytes):
+        #   40 18 82 d3 8a 88 00 0d 00 2d
+        #   "SB100001\0\0" 01 00 00 00 ff ff ff ff
+        #   "SB0000062\0" "SB000006\0\0"
+        expected = bytes.fromhex(
+            "401882d38a88000d002d"
+            "53423130303030310000"
+            "01000000ffffffff"
+            "5342303030303036320053423030303030360000"
+        )
+        msg = encode_door_open_during_video(
+            our_addr="SB0000062",
+            entrance_addr="SB100001",
+            call_counter=0x888AD382,
+            relay_index=1,
+            apt_addr="SB000006",
+        )
+        assert msg == expected, msg.hex()
+
+    def test_trailing_field_is_apt_addr_not_entrance(self):
+        msg = encode_door_open_during_video(
+            "SB0000062", "SB100001", 0, 1, apt_addr="SB000006"
+        )
+        # last 10 bytes = apt_addr, NOT entrance_addr
+        assert msg[-10:] == b"SB000006\x00\x00"
+
+    def test_apt_addr_defaults_to_entrance_for_back_compat(self):
+        msg = encode_door_open_during_video("SB0000062", "SB100001", 0, 1)
+        assert msg[-10:] == b"SB100001\x00\x00"

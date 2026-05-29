@@ -548,23 +548,29 @@ def encode_door_open_during_video(
     entrance_addr: str,
     call_counter: int,
     relay_index: int,
+    apt_addr: str | None = None,
 ) -> bytes:
     """Encode a door open command for use on an active video CTPP channel.
 
-    PCAP-verified (camera_feed_with_open_door_local.pcap): during video the
-    Android app sends a SINGLE 0x1840/0x000D message on the existing video
-    CTPP channel — no separate channel open, no 6-step sequence.
+    PCAP-verified (notification+opendoorwhilevideo.pcap, frames 450/850):
 
-    Body structure (48 bytes):
       [LE16 0x1840] [LE32 counter] [BE16 0x000D] [BE16 0x002D]
       [entrance_addr padded to 10] [LE32 relay_index] [4× 0xFF]
-      [our_addr padded to 10] [entrance_addr padded to 10]
+      [our_addr padded to 10] [apt_addr padded to 10]
 
-    relay_index: the door's output_index from the device config (PCAP shows 1
-    for the only door on that device; use door.output_index for our device).
+    The trailing 10 bytes are `apt_addr` (the apartment address WITHOUT the
+    subaddress, e.g. "SB000006"), not entrance_addr. The earlier
+    `camera_feed_with_open_door_local.pcap` happened to have apt_addr equal
+    to entrance_addr, which masked this bug.
+
+    `apt_addr` is optional for backwards compatibility; if omitted it falls
+    back to entrance_addr (the previous, buggy behavior). Callers should
+    always pass it.
     """
+    apt_addr = apt_addr if apt_addr is not None else entrance_addr
     our_b  = our_addr.encode("ascii").ljust(10, b"\x00")[:10]
     entr_b = entrance_addr.encode("ascii").ljust(10, b"\x00")[:10]
+    apt_b  = apt_addr.encode("ascii").ljust(10, b"\x00")[:10]
     buf = bytearray()
     buf += struct.pack("<H", 0x1840)
     buf += struct.pack("<I", call_counter)
@@ -574,7 +580,7 @@ def encode_door_open_during_video(
     buf += struct.pack("<I", relay_index)
     buf += b"\xff\xff\xff\xff"
     buf += our_b
-    buf += entr_b
+    buf += apt_b
     return bytes(buf)
 
 
