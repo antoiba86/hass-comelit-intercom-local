@@ -18,6 +18,7 @@ from custom_components.comelit_intercom_local.models import PushEvent
 # Placeholder JPEG validity
 # ---------------------------------------------------------------------------
 
+
 def test_placeholder_jpeg_valid():
     """Placeholder JPEG starts with SOI and ends with EOI markers."""
     assert PLACEHOLDER_JPEG[:2] == b"\xff\xd8"  # SOI
@@ -28,6 +29,7 @@ def test_placeholder_jpeg_valid():
 # ---------------------------------------------------------------------------
 # Camera fixture
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture
 def camera() -> ComelitIntercomCamera:
@@ -43,6 +45,7 @@ def camera() -> ComelitIntercomCamera:
 # ---------------------------------------------------------------------------
 # async_camera_image
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_camera_image_returns_placeholder_when_no_session(camera):
@@ -79,6 +82,7 @@ async def test_camera_image_returns_frame_when_active(camera):
 # ---------------------------------------------------------------------------
 # stream_source
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_stream_source_returns_url_when_session_active(camera):
@@ -121,6 +125,7 @@ async def test_stream_source_returns_url_when_ready_event_fires(camera):
 # ---------------------------------------------------------------------------
 # Doorbell push guard
 # ---------------------------------------------------------------------------
+
 
 def test_on_push_skips_when_already_active(camera):
     """_on_push does not start video if session already active."""

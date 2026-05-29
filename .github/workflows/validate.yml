@@ -1,0 +1,51 @@
+name: Validate
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  hacs:
+    name: HACS Validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hacs/action@22.5.0
+        with:
+          category: integration
+
+  hassfest:
+    name: Hassfest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: home-assistant/actions/hassfest@master
+
+  # Lint and type-check are informational for now: the codebase has not yet been
+  # swept against the full ruff ruleset / mypy, and the protocol-verified flow
+  # files (door.py, video_call.py) are intentionally excluded from auto-fixing.
+  # Flip continue-on-error to false once the tree is clean.
+  lint:
+    name: Ruff
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install ruff
+      - run: ruff check custom_components/
+      - run: ruff format --check custom_components/ tests/
+
+  typecheck:
+    name: Mypy
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install mypy aiohttp av pytest-homeassistant-custom-component
+      - run: mypy custom_components/comelit_intercom_local/

@@ -43,6 +43,7 @@ class TestDoorbellEventMeta:
 
     def test_event_types(self):
         from custom_components.comelit_intercom_local.event import EVENT_TYPES
+
         assert "ring" in EVENT_TYPES
         assert "missed_call" in EVENT_TYPES
 

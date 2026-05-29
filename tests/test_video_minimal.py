@@ -41,7 +41,10 @@ class UdpListener(asyncio.DatagramProtocol):
         self.packets += 1
         _LOGGER.info(
             "UDP RECEIVED #%d: %d bytes from %s:%d — first 20: %s",
-            self.packets, len(data), addr[0], addr[1],
+            self.packets,
+            len(data),
+            addr[0],
+            addr[1],
             data[:20].hex(" "),
         )
 
@@ -56,6 +59,7 @@ async def main():
 
     # Get config to know our apt address
     from custom_components.comelit_intercom_local.config_reader import get_device_config
+
     config = await get_device_config(client)
     apt_addr = config.apt_address
     apt_sub = config.apt_subaddress
@@ -75,7 +79,8 @@ async def main():
         udpm_token = struct.unpack_from("<H", udpm.open_response_body, 16)[0]
     _LOGGER.info(
         "UDPM opened: req_id=0x%04X, token=0x%04X, response=%s",
-        udpm.request_id, udpm_token,
+        udpm.request_id,
+        udpm_token,
         udpm.open_response_body.hex(" "),
     )
 
@@ -101,17 +106,17 @@ async def main():
 
     # Step 4: Open 2 RTPC channels
     rtpc1 = await client.open_channel("RTPC", ChannelType.UAUT, trailing_byte=1)
-    rtpc2 = await client.open_channel(
-        "RTPC2", ChannelType.UAUT, trailing_byte=1, wire_name="RTPC"
-    )
+    rtpc2 = await client.open_channel("RTPC2", ChannelType.UAUT, trailing_byte=1, wire_name="RTPC")
     _LOGGER.info(
         "RTPC channels: rtpc1=0x%04X, rtpc2=0x%04X",
-        rtpc1.request_id, rtpc2.request_id,
+        rtpc1.request_id,
+        rtpc2.request_id,
     )
 
     # Step 5: Send video config directly on CTPP (skip call signaling)
     from custom_components.comelit_intercom_local.protocol import encode_video_config
     import time
+
     ts = int(time.time()) & 0xFFFFFFFF
     vid_config = encode_video_config(caller, CALLEE, rtpc2.request_id, ts)
     await client.send_binary(ctpp, vid_config)

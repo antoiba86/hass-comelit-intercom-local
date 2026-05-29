@@ -134,9 +134,9 @@ class TestRegisterPush:
         client.send_json = AsyncMock(return_value={})
 
         installed_callback = None
-        client.set_push_callback = lambda cb: setattr(
-            type("_", (), {})(), "_", None
-        ) or globals().update({"_cb": cb}) or (lambda: None)()
+        client.set_push_callback = lambda cb: (
+            setattr(type("_", (), {})(), "_", None) or globals().update({"_cb": cb}) or (lambda: None)()
+        )
 
         # Simpler capture
         captured = []

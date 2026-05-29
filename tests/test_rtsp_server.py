@@ -384,7 +384,7 @@ class TestBroadcastRtp:
         written = client.writer.write.call_args[0][0]
         # TCP interleaved: $ + channel + length (2 BE) + RTP
         assert written[0] == 0x24  # '$'
-        assert written[1] == 0     # video channel
+        assert written[1] == 0  # video channel
         length = struct.unpack_from("!H", written, 2)[0]
         assert length == len(pkt)
 
@@ -459,7 +459,7 @@ class TestSendH264:
     def test_small_nal_single_rtp_packet(self):
         """NAL ≤ 1400 bytes is sent as a single RTP packet with marker=True."""
         server, written = self._setup_server_with_client()
-        nal_data = b"\x65" + b"\xAA" * 100  # IDR NAL
+        nal_data = b"\x65" + b"\xaa" * 100  # IDR NAL
         server._send_h264(nal_data)
 
         assert len(written) == 1
@@ -471,7 +471,7 @@ class TestSendH264:
     def test_large_nal_fragmented_fu_a(self):
         """NAL > 1400 bytes is fragmented into multiple FU-A RTP packets."""
         server, written = self._setup_server_with_client()
-        nal_data = b"\x65" + b"\xBB" * 3000  # Large IDR NAL
+        nal_data = b"\x65" + b"\xbb" * 3000  # Large IDR NAL
         server._send_h264(nal_data)
 
         assert len(written) > 1
@@ -481,13 +481,13 @@ class TestSendH264:
         nal_header_byte = first_rtp[12]
         fu_header_byte = first_rtp[13]
         assert (nal_header_byte & 0x1F) == 28  # FU-A type
-        assert fu_header_byte & 0x80            # Start bit
+        assert fu_header_byte & 0x80  # Start bit
 
         # Last fragment: end bit set, marker bit set
         last_rtp = written[-1][4:]
         last_fu_header = last_rtp[13]
-        assert last_fu_header & 0x40            # End bit
-        assert last_rtp[1] & 0x80              # Marker bit
+        assert last_fu_header & 0x40  # End bit
+        assert last_rtp[1] & 0x80  # Marker bit
 
     def test_small_nal_increments_video_seq(self):
         """Each RTP packet sent increments the video sequence counter."""
@@ -516,7 +516,7 @@ class TestSendH264:
         server._active_clients.append(client)
 
         # The feed loop reads from nal_queue and strips start codes
-        nal_with_start = b"\x00\x00\x00\x01\x65" + b"\xCC" * 20
+        nal_with_start = b"\x00\x00\x00\x01\x65" + b"\xcc" * 20
         server.nal_queue.put_nowait(nal_with_start)
 
         # Verify _send_h264 does not receive the start code

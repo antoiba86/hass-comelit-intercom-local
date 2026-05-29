@@ -7,13 +7,19 @@ import logging
 from typing import Any
 
 import voluptuous as vol
-
 from homeassistant import config_entries
 from homeassistant.const import CONF_HOST, CONF_PASSWORD, CONF_PORT, CONF_TOKEN
 
 from .auth import authenticate
 from .client import IconaBridgeClient
-from .const import CONF_ENABLE_NOTIFICATIONS, CONF_HTTP_PORT, CONF_VERBOSE_LOGGING, DEFAULT_HTTP_PORT, DEFAULT_PORT, DOMAIN
+from .const import (
+    CONF_ENABLE_NOTIFICATIONS,
+    CONF_HTTP_PORT,
+    CONF_VERBOSE_LOGGING,
+    DEFAULT_HTTP_PORT,
+    DEFAULT_PORT,
+    DOMAIN,
+)
 from .exceptions import (
     AuthenticationError,
     ConnectionComelitError as ComelitConnectionError,
@@ -46,9 +52,7 @@ class ComelitLocalConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         """Return the options flow handler."""
         return ComelitLocalOptionsFlow(config_entry)
 
-    async def async_step_user(
-        self, user_input: dict[str, Any] | None = None
-    ) -> config_entries.ConfigFlowResult:
+    async def async_step_user(self, user_input: dict[str, Any] | None = None) -> config_entries.ConfigFlowResult:
         """Handle the initial step."""
         errors: dict[str, str] = {}
 
@@ -66,7 +70,9 @@ class ComelitLocalConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 try:
                     token = await extract_token(host, password, http_port)
                 except Exception as err:
-                    _LOGGER.exception("Token extraction failed: %s", err)  # nosemgrep: python-logger-credential-disclosure
+                    _LOGGER.exception(
+                        "Token extraction failed: %s", err
+                    )  # nosemgrep: python-logger-credential-disclosure
                     errors["base"] = "token_extraction_failed"
 
             if not errors:
@@ -110,9 +116,7 @@ class ComelitLocalOptionsFlow(config_entries.OptionsFlow):
     def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
         self._config_entry = config_entry
 
-    async def async_step_init(
-        self, user_input: dict[str, Any] | None = None
-    ) -> config_entries.ConfigFlowResult:
+    async def async_step_init(self, user_input: dict[str, Any] | None = None) -> config_entries.ConfigFlowResult:
         """Show the options form."""
         if user_input is not None:
             return self.async_create_entry(title="", data=user_input)

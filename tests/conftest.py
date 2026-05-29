@@ -68,9 +68,7 @@ class _ConfigFlow:
         return _ConfigFlowResult(type="create_entry", title=title, data=data)
 
     def async_show_form(self, *, step_id, data_schema, errors):
-        return _ConfigFlowResult(
-            type="form", step_id=step_id, data_schema=data_schema, errors=errors
-        )
+        return _ConfigFlowResult(type="form", step_id=step_id, data_schema=data_schema, errors=errors)
 
 
 # ---------------------------------------------------------------------------
@@ -158,6 +156,7 @@ sys.modules["homeassistant.helpers.update_coordinator"] = _ha_update_coordinator
 _ha_helpers_entity = MagicMock()
 _ha_helpers_entity.DeviceInfo = dict  # DeviceInfo is dict-like
 
+
 class _ButtonEntity:
     """Minimal stub for homeassistant.components.button.ButtonEntity."""
 
@@ -188,6 +187,7 @@ _ha_update_coordinator.CoordinatorEntity = _CoordinatorEntity
 # Make homeassistant.core.callback a passthrough decorator (not a MagicMock)
 # so that @callback-decorated methods remain callable in tests.
 _ha.core.callback = lambda fn: fn
+
 
 # Stub for homeassistant.components.event
 class _DoorbellEventType:
@@ -227,6 +227,7 @@ _ha_event = MagicMock()
 _ha_event.EventEntity = _EventEntity
 _ha_event.DoorbellEventType = _DoorbellEventType
 _ha_event.EventDeviceClass = _EventDeviceClass
+
 
 # Stub for homeassistant.components.binary_sensor
 class _BinarySensorEntity:

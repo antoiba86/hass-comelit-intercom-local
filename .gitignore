@@ -11,6 +11,8 @@ build/
 # Environment
 .env
 .env.*
+uv.lock
+.venv/
 
 # macOS
 .DS_Store

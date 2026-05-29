@@ -20,10 +20,11 @@ Known prefixes (from PCAP analysis):
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+import contextlib
 import logging
 import struct
 import time
+from collections.abc import Callable
 
 from .client import IconaBridgeClient
 from .const import is_verbose_logging
@@ -41,13 +42,13 @@ PREFIX_VIP_EVENT = 0x1860
 PREFIX_CALL_INIT = 0x18C0
 
 # VIP FSM action codes (carried in 0x1860 messages)
-ACTION_IDLE = 0x0000               # Device returned to idle state
-ACTION_IN_ALERTING = 0x0001        # Incoming call / doorbell ring
-ACTION_CONNECTED = 0x0002          # Call was answered
-ACTION_DOOR_OPENED = 0x0003        # Door opened (OUT_INITIATED, confirmed by testing)
-ACTION_OUT_ALERTING = 0x0004       # Outgoing call is ringing
-ACTION_CLOSED = 0x0005             # Call ended
-ACTION_CALL_TERMINATED = 0x000A        # Call terminated by far end (seen after video stop)
+ACTION_IDLE = 0x0000  # Device returned to idle state
+ACTION_IN_ALERTING = 0x0001  # Incoming call / doorbell ring
+ACTION_CONNECTED = 0x0002  # Call was answered
+ACTION_DOOR_OPENED = 0x0003  # Door opened (OUT_INITIATED, confirmed by testing)
+ACTION_OUT_ALERTING = 0x0004  # Outgoing call is ringing
+ACTION_CLOSED = 0x0005  # Call ended
+ACTION_CALL_TERMINATED = 0x000A  # Call terminated by far end (seen after video stop)
 ACTION_REGISTRATION_RENEWAL = 0x0010  # Device keepalive — must ACK with 0x1800+0x1820
 
 # Minimum message size: prefix(2) + timestamp(4) + action(2) = 8
@@ -161,8 +162,7 @@ class VipEventListener:
         ctpp = self._client.get_channel("CTPP")
         if ctpp is None:
             raise RuntimeError(
-                "CTPP channel not open — coordinator must call _open_ctpp_channels() "
-                "before starting the VIP listener"
+                "CTPP channel not open — coordinator must call _open_ctpp_channels() before starting the VIP listener"
             )
         self._channel = ctpp
 
@@ -179,10 +179,8 @@ class VipEventListener:
         self._running = False
         if self._task and not self._task.done():
             self._task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._task
-            except asyncio.CancelledError:
-                pass
         self._task = None
 
     async def stop(self) -> None:
@@ -217,13 +215,16 @@ class VipEventListener:
                 self.restart_count += 1
                 _LOGGER.error(
                     "VIP listener loop crashed (restart #%d, %d in %.0fs window)",
-                    self.restart_count, len(restart_times), _RESTART_WINDOW,
+                    self.restart_count,
+                    len(restart_times),
+                    _RESTART_WINDOW,
                     exc_info=True,
                 )
                 if len(restart_times) > _RESTART_LIMIT:
                     _LOGGER.error(
                         "VIP listener exceeded %d restarts in %ds — escalating to coordinator",
-                        _RESTART_LIMIT, int(_RESTART_WINDOW),
+                        _RESTART_LIMIT,
+                        int(_RESTART_WINDOW),
                     )
                     raise
                 await asyncio.sleep(1)
@@ -250,11 +251,7 @@ class VipEventListener:
         now = time.time()
         key = (prefix, action)
         last = self._last_seen_ts.get(key)
-        is_retransmit = (
-            last is not None
-            and last[0] == ts
-            and (now - last[1]) < self._retransmit_window
-        )
+        is_retransmit = last is not None and last[0] == ts and (now - last[1]) < self._retransmit_window
         self._last_seen_ts[key] = (ts, now)
 
         # Log at INFO only for events that represent real VIP activity:
@@ -267,37 +264,46 @@ class VipEventListener:
         # Retransmits we expect and don't warn about:
         # - 0x1840 video tail (no valid counter to ACK after video stops)
         # - 0x1860/0x0003 (intentionally not ACK'd; see ACK branch below)
-        _is_expected_retransmit = (
-            prefix == PREFIX_VIDEO_EVENT
-            or (prefix == PREFIX_VIP_EVENT and action == ACTION_DOOR_OPENED)
+        _is_expected_retransmit = prefix == PREFIX_VIDEO_EVENT or (
+            prefix == PREFIX_VIP_EVENT and action == ACTION_DOOR_OPENED
         )
         if is_retransmit:
             if _is_expected_retransmit:
                 if is_verbose_logging():
                     _LOGGER.debug(
-                        "VIP: expected retransmit ignored "
-                        "(prefix=0x%04X action=0x%04X ts=0x%08X)",
-                        prefix, action, ts,
+                        "VIP: expected retransmit ignored (prefix=0x%04X action=0x%04X ts=0x%08X)",
+                        prefix,
+                        action,
+                        ts,
                     )
             else:
                 _LOGGER.warning(
                     "VIP RETRANSMIT: prefix=0x%04X action=0x%04X ts=0x%08X "
                     "— our previous ACK was not accepted by device (addrs=%s)",
-                    prefix, action, ts, addresses,
+                    prefix,
+                    action,
+                    ts,
+                    addresses,
                 )
         elif _is_real_vip:
             if is_verbose_logging():
                 _LOGGER.info(
                     "VIP event: prefix=0x%04X action=0x%04X ts=0x%08X flags=0x%04X addrs=%s (%d bytes)",
-                    prefix, action, ts,
+                    prefix,
+                    action,
+                    ts,
                     msg.get("flags", 0),
-                    addresses, len(data),
+                    addresses,
+                    len(data),
                 )
         else:
             if is_verbose_logging():
                 _LOGGER.debug(
                     "VIP tail/keepalive: prefix=0x%04X action=0x%04X ts=0x%08X (%d bytes)",
-                    prefix, action, ts, len(data),
+                    prefix,
+                    action,
+                    ts,
+                    len(data),
                 )
 
         if is_verbose_logging():
@@ -367,7 +373,8 @@ class VipEventListener:
             if is_verbose_logging():
                 _LOGGER.debug(
                     "VIP: sent event ACK (action=0x%04X, ts=0x%08X)",
-                    msg["action"], self._ack_ts,
+                    msg["action"],
+                    self._ack_ts,
                 )
         except Exception:
             _LOGGER.warning("VIP: failed to send event ACK", exc_info=True)
@@ -395,7 +402,8 @@ class VipEventListener:
             if is_verbose_logging():
                 _LOGGER.info(
                     "VIP: sent renewal ACK pair (device_ts=0x%08X ack_ts=0x%08X)",
-                    msg["timestamp"], self._ack_ts,
+                    msg["timestamp"],
+                    self._ack_ts,
                 )
         except Exception:
             _LOGGER.warning("VIP: failed to send renewal ACK", exc_info=True)
@@ -465,7 +473,8 @@ class VipEventListener:
                 if is_verbose_logging():
                     _LOGGER.debug(
                         "VIP FSM event ignored (unknown action=0x%04X, miss_count=%d)",
-                        action, self.decode_misses[key],
+                        action,
+                        self.decode_misses[key],
                     )
             return
 
@@ -481,7 +490,10 @@ class VipEventListener:
         if is_verbose_logging():
             _LOGGER.debug(
                 "VIP event (not doorbell): prefix=0x%04X action=0x%04X addrs=%s (miss_count=%d)",
-                prefix, action, addresses, self.decode_misses[key],
+                prefix,
+                action,
+                addresses,
+                self.decode_misses[key],
             )
 
     def _fire_event(self, event_type: str, addresses: list[str]) -> None:

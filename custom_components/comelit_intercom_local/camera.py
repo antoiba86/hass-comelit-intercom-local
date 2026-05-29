@@ -31,11 +31,7 @@ async def async_setup_entry(
     if not config:
         return
 
-    entities: list[Camera] = [
-        ComelitCamera(coordinator, cam, entry.entry_id)
-        for cam in config.cameras
-        if cam.rtsp_url
-    ]
+    entities: list[Camera] = [ComelitCamera(coordinator, cam, entry.entry_id) for cam in config.cameras if cam.rtsp_url]
 
     # Add intercom camera if there are doors (i.e. the device has an intercom)
     if config.doors:
@@ -153,16 +149,12 @@ class ComelitIntercomCamera(Camera):
         if self._coordinator.video_session is not None:
             return self._coordinator.rtsp_url
         try:
-            await asyncio.wait_for(
-                self._coordinator._video_ready_event.wait(), timeout=5.0
-            )
+            await asyncio.wait_for(self._coordinator._video_ready_event.wait(), timeout=5.0)
             return self._coordinator.rtsp_url
         except TimeoutError:
             return None
 
-    async def async_camera_image(
-        self, width: int | None = None, height: int | None = None
-    ) -> bytes | None:
+    async def async_camera_image(self, width: int | None = None, height: int | None = None) -> bytes | None:
         """Return the latest JPEG frame, or placeholder when video is off."""
         session = self._coordinator.video_session
         if not session or not session.active or not session.rtp_receiver:
@@ -172,12 +164,8 @@ class ComelitIntercomCamera(Camera):
     async def async_added_to_hass(self) -> None:
         """Register for push events when entity is added."""
         self._remove_push_cb = self._coordinator.add_push_callback(self._on_push)
-        self._remove_stop_video_cb = self._coordinator.add_stop_video_callback(
-            self._async_stop_ha_stream
-        )
-        self._remove_state_cb = self._coordinator.add_video_state_change_callback(
-            self._async_video_state_changed
-        )
+        self._remove_stop_video_cb = self._coordinator.add_stop_video_callback(self._async_stop_ha_stream)
+        self._remove_state_cb = self._coordinator.add_video_state_change_callback(self._async_video_state_changed)
 
     async def async_will_remove_from_hass(self) -> None:
         """Unregister callbacks when entity is removed."""

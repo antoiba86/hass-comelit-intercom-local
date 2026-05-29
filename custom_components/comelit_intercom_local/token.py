@@ -88,10 +88,7 @@ async def extract_token(
         backup_files = re.findall(r"([0-9]+\.tar\.gz)", html)
 
         if not backup_files:
-            raise TokenExtractionError(
-                f"No backup files found on device. "
-                f"Page content (first 500 chars): {html[:500]}"
-            )
+            raise TokenExtractionError(f"No backup files found on device. Page content (first 500 chars): {html[:500]}")
 
         # Use the latest backup (highest number)
         backup_files.sort()
@@ -142,18 +139,16 @@ def _parse_token_from_archive(archive_data: bytes) -> str | None:
                         for token in matches:
                             if token != "00000000000000000000000000000000":
                                 if is_verbose_logging():
-                                    _LOGGER.debug("Extracted token: %s...%s", token[:4], token[-4:])  # nosemgrep: python-logger-credential-disclosure
+                                    _LOGGER.debug(
+                                        "Extracted token: %s...%s", token[:4], token[-4:]
+                                    )  # nosemgrep: python-logger-credential-disclosure
                                 return token
 
                     raise TokenExtractionError(
-                        f"Token pattern not found in users.cfg "
-                        f"(file size: {len(content)} bytes)"
+                        f"Token pattern not found in users.cfg (file size: {len(content)} bytes)"
                     )
 
     except tarfile.TarError as e:
         raise TokenExtractionError(f"Failed to read backup archive: {e}") from e
 
-    raise TokenExtractionError(
-        f"users.cfg not found in backup archive. "
-        f"Members seen: {members_seen}"
-    )
+    raise TokenExtractionError(f"users.cfg not found in backup archive. Members seen: {members_seen}")

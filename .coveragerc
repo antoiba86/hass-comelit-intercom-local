@@ -1,0 +1,15 @@
+[run]
+source = custom_components/comelit_intercom_local
+omit =
+
+[report]
+exclude_lines =
+    pragma: no cover
+    def __repr__
+    if TYPE_CHECKING:
+    raise NotImplementedError
+    \.\.\.
+
+[paths]
+source =
+    custom_components/comelit_intercom_local

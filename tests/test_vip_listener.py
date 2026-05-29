@@ -115,9 +115,7 @@ class TestParseCtppMessage:
         assert msg["flags"] == 0xABCD
 
     def test_extracts_sb_addresses(self):
-        data = _make_ctpp_msg(
-            PREFIX_VIP_EVENT, 0, 0, flags=0, addresses=["SB000001", "SB000006"]
-        )
+        data = _make_ctpp_msg(PREFIX_VIP_EVENT, 0, 0, flags=0, addresses=["SB000001", "SB000006"])
         msg = parse_ctpp_message(data)
         assert "SB000001" in msg["addresses"]
         assert "SB000006" in msg["addresses"]
@@ -368,7 +366,10 @@ class TestProcessMessage:
 
         # Real door open: caller is an entrance address, NOT the apartment
         data = _make_ctpp_msg(
-            PREFIX_VIP_EVENT, 0x12345678, ACTION_DOOR_OPENED, flags=0,
+            PREFIX_VIP_EVENT,
+            0x12345678,
+            ACTION_DOOR_OPENED,
+            flags=0,
             addresses=["SB100001", "SB0000061"],
         )
         await listener._process_message(data)
@@ -396,7 +397,10 @@ class TestProcessMessage:
 
         # Apartment-internal: caller is the apartment's bare address
         data = _make_ctpp_msg(
-            PREFIX_VIP_EVENT, 0x12345678, ACTION_DOOR_OPENED, flags=0,
+            PREFIX_VIP_EVENT,
+            0x12345678,
+            ACTION_DOOR_OPENED,
+            flags=0,
             addresses=["SB000006", "SB0000061"],
         )
         await listener._process_message(data)
@@ -440,9 +444,7 @@ class TestProcessMessage:
 
         # Device renewal timestamp is completely different — listener must ignore it
         device_ts = 0xE869C888
-        data = _make_ctpp_msg(
-            PREFIX_VIP_EVENT, device_ts, ACTION_REGISTRATION_RENEWAL, flags=0
-        )
+        data = _make_ctpp_msg(PREFIX_VIP_EVENT, device_ts, ACTION_REGISTRATION_RENEWAL, flags=0)
 
         sent_payloads: list[bytes] = []
 

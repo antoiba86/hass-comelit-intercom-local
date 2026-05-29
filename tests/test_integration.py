@@ -13,9 +13,7 @@ COMELIT_HOST = os.environ.get("COMELIT_HOST")
 COMELIT_TOKEN = os.environ.get("COMELIT_TOKEN")
 COMELIT_PASSWORD = os.environ.get("COMELIT_PASSWORD", "comelit")
 
-pytestmark = pytest.mark.skipif(
-    not COMELIT_HOST, reason="COMELIT_HOST not set (real device required)"
-)
+pytestmark = pytest.mark.skipif(not COMELIT_HOST, reason="COMELIT_HOST not set (real device required)")
 
 
 @pytest.mark.asyncio

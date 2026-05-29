@@ -222,6 +222,7 @@ class TestCallbackRegistration:
         coord._video_session = mock_session
 
         fired = []
+
         async def cb():
             fired.append(True)
 
@@ -239,6 +240,7 @@ class TestCallbackRegistration:
         coord._video_session = mock_session
 
         fired = []
+
         async def cb():
             fired.append(True)
 
@@ -272,6 +274,7 @@ class TestCallbackRegistration:
         mock_session.start = AsyncMock()
 
         fired = []
+
         async def cb():
             fired.append(True)
 
@@ -294,6 +297,7 @@ class TestCallbackRegistration:
         coord._video_session = mock_session
 
         fired = []
+
         async def cb():
             fired.append(True)
 
@@ -310,6 +314,7 @@ class TestCallbackRegistration:
         mock_session.start = AsyncMock()
 
         fired = []
+
         async def cb():
             fired.append(True)
 
@@ -362,9 +367,7 @@ class TestAsyncOpenDoor:
         ) as mock_open_door:
             await coord.async_open_door(door)
 
-        mock_open_door.assert_awaited_once_with(
-            coord.host, coord.port, coord.token, coord._client, coord._config, door
-        )
+        mock_open_door.assert_awaited_once_with(coord.host, coord.port, coord.token, coord._client, coord._config, door)
 
     @pytest.mark.asyncio
     async def test_raises_when_not_connected(self):

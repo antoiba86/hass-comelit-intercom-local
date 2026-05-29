@@ -94,9 +94,7 @@ async def test_open_channel():
     reader.feed(_make_command_response(server_channel_id=42))
 
     try:
-        channel = await asyncio.wait_for(
-            client.open_channel("UAUT", ChannelType.UAUT), timeout=3.0
-        )
+        channel = await asyncio.wait_for(client.open_channel("UAUT", ChannelType.UAUT), timeout=3.0)
         assert channel.is_open
         assert channel.server_channel_id == 42
         assert channel.name == "UAUT"
@@ -130,18 +128,14 @@ async def test_send_json_and_receive():
     reader.feed(_make_command_response(server_channel_id=100))
 
     try:
-        channel = await asyncio.wait_for(
-            client.open_channel("UAUT", ChannelType.UAUT), timeout=3.0
-        )
+        channel = await asyncio.wait_for(client.open_channel("UAUT", ChannelType.UAUT), timeout=3.0)
 
         # Device responds with server_channel_id (100) as the request_id
         response_payload = {"message": "access", "response-code": 200, "response-string": "OK"}
         reader.feed(_make_json_response(100, response_payload))
 
         # Start send_json as a background task
-        send_task = asyncio.create_task(
-            client.send_json(channel, {"message": "access", "user-token": "test"})
-        )
+        send_task = asyncio.create_task(client.send_json(channel, {"message": "access", "user-token": "test"}))
 
         # Wait for the packet to be written, then extract the msg_request_id
         for _ in range(50):
@@ -187,15 +181,11 @@ async def test_concurrent_send_json_on_same_channel():
     reader.feed(_make_command_response(server_channel_id=100))
 
     try:
-        channel = await asyncio.wait_for(
-            client.open_channel("UAUT", ChannelType.UAUT), timeout=3.0
-        )
+        channel = await asyncio.wait_for(client.open_channel("UAUT", ChannelType.UAUT), timeout=3.0)
 
         # Hold the lock manually — send_json must block
         await channel.send_lock.acquire()
-        blocked_task = asyncio.create_task(
-            client.send_json(channel, {"req": "blocked"})
-        )
+        blocked_task = asyncio.create_task(client.send_json(channel, {"req": "blocked"}))
         await asyncio.sleep(0.05)
         assert not blocked_task.done(), "send_json should block while lock is held"
 

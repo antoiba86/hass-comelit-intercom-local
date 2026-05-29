@@ -37,12 +37,8 @@ class TestComelitStopVideoButton:
         btn = _make_stop_button()
         call_order = []
 
-        btn.coordinator.request_video_stop = MagicMock(
-            side_effect=lambda: call_order.append("request_stop")
-        )
-        btn.coordinator.async_stop_video = AsyncMock(
-            side_effect=lambda: call_order.append("async_stop")
-        )
+        btn.coordinator.request_video_stop = MagicMock(side_effect=lambda: call_order.append("request_stop"))
+        btn.coordinator.async_stop_video = AsyncMock(side_effect=lambda: call_order.append("async_stop"))
 
         await btn.async_press()
 
@@ -52,9 +48,7 @@ class TestComelitStopVideoButton:
     async def test_press_does_not_raise_on_exception(self):
         """async_press must not propagate exceptions."""
         btn = _make_stop_button()
-        btn.coordinator.async_stop_video = AsyncMock(
-            side_effect=RuntimeError("stop failed")
-        )
+        btn.coordinator.async_stop_video = AsyncMock(side_effect=RuntimeError("stop failed"))
 
         await btn.async_press()  # should not raise
 
@@ -107,8 +101,10 @@ class TestComelitDoorButton:
 
         # Capture and close the coroutine so it doesn't leak
         created_coros = []
+
         def capture_task(coro):
             created_coros.append(coro)
+
         btn.hass.async_create_task = capture_task
 
         await btn.async_press()

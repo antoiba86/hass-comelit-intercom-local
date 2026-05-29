@@ -292,7 +292,7 @@ class TestProcessRtp:
         # FU-A start: nal_type=28 (0x1C), fu_header=start_bit(0x80)|type(5)=0x85
         fu_indicator = 0x7C  # forbidden=0, nal_ref=3, type=28
         fu_header_start = 0x85  # S=1, E=0, R=0, type=5 (IDR)
-        start_fragment = bytes([fu_indicator, fu_header_start]) + b"\xAA" * 10
+        start_fragment = bytes([fu_indicator, fu_header_start]) + b"\xaa" * 10
         rtp_start = _make_rtp_packet(start_fragment)
         receiver._process_rtp(rtp_start)
 
@@ -302,7 +302,7 @@ class TestProcessRtp:
 
         # FU-A end: S=0, E=1
         fu_header_end = 0x45  # S=0, E=1, type=5
-        end_fragment = bytes([fu_indicator, fu_header_end]) + b"\xBB" * 8
+        end_fragment = bytes([fu_indicator, fu_header_end]) + b"\xbb" * 8
         rtp_end = _make_rtp_packet(end_fragment)
         receiver._process_rtp(rtp_end)
 
@@ -317,7 +317,7 @@ class TestProcessRtp:
 
         fu_indicator = 0x7C
         fu_header_cont = 0x05  # S=0, E=0 — continuation
-        cont_fragment = bytes([fu_indicator, fu_header_cont]) + b"\xCC" * 5
+        cont_fragment = bytes([fu_indicator, fu_header_cont]) + b"\xcc" * 5
         rtp_cont = _make_rtp_packet(cont_fragment)
         receiver._process_rtp(rtp_cont)
 
@@ -326,7 +326,7 @@ class TestProcessRtp:
     def test_fua_too_short_ignored(self):
         """FU-A packet with only 1 byte of NAL data is ignored."""
         receiver = RtpReceiver("127.0.0.1")
-        nal_payload = b"\x7C"  # type=28, no FU header
+        nal_payload = b"\x7c"  # type=28, no FU header
         rtp = _make_rtp_packet(nal_payload)
         receiver._process_rtp(rtp)
         assert receiver._nal_queue.empty()
@@ -480,11 +480,7 @@ class TestStartControl:
 
         with patch(
             "asyncio.get_running_loop",
-            return_value=MagicMock(
-                create_datagram_endpoint=AsyncMock(
-                    return_value=(mock_transport, mock_protocol)
-                )
-            ),
+            return_value=MagicMock(create_datagram_endpoint=AsyncMock(return_value=(mock_transport, mock_protocol))),
         ):
             port = await receiver.start_control()
 
@@ -503,11 +499,7 @@ class TestStartControl:
 
         with patch(
             "asyncio.get_running_loop",
-            return_value=MagicMock(
-                create_datagram_endpoint=AsyncMock(
-                    return_value=(mock_transport, MagicMock())
-                )
-            ),
+            return_value=MagicMock(create_datagram_endpoint=AsyncMock(return_value=(mock_transport, MagicMock()))),
         ):
             await receiver.start_control()
 
@@ -559,6 +551,7 @@ class TestKeepaliveLoop:
         # Clean up
         receiver._keepalive_task.cancel()
         import contextlib
+
         with contextlib.suppress(asyncio.CancelledError):
             await receiver._keepalive_task
 
@@ -596,6 +589,7 @@ class TestFrameToJpeg:
 
     def test_frame_to_jpeg_returns_none_when_save_writes_nothing(self):
         """_frame_to_jpeg returns None when image.save() writes zero bytes."""
+
         class EmptyImage:
             def save(self, buf, **kwargs):
                 pass  # write nothing
@@ -609,6 +603,7 @@ class TestFrameToJpeg:
 
     def test_frame_to_jpeg_returns_none_on_exception(self):
         """_frame_to_jpeg returns None when to_image() raises."""
+
         class BrokenFrame:
             def to_image(self):
                 raise RuntimeError("boom")
@@ -655,13 +650,22 @@ class TestAttachRtspQueues:
 
 def _make_audio_rtp(pt: int, payload: bytes = b"\xd5" * 160) -> bytes:
     """Build a minimal valid RTP packet with the given payload type."""
-    header = bytes([
-        0x80,       # V=2, P=0, X=0, CC=0
-        pt & 0x7F,  # M=0, PT
-        0x00, 0x01, # seq=1
-        0x00, 0x00, 0x00, 0x00,  # timestamp=0
-        0x00, 0x00, 0x00, 0x01,  # ssrc=1
-    ])
+    header = bytes(
+        [
+            0x80,  # V=2, P=0, X=0, CC=0
+            pt & 0x7F,  # M=0, PT
+            0x00,
+            0x01,  # seq=1
+            0x00,
+            0x00,
+            0x00,
+            0x00,  # timestamp=0
+            0x00,
+            0x00,
+            0x00,
+            0x01,  # ssrc=1
+        ]
+    )
     return header + payload
 
 
@@ -749,9 +753,7 @@ class TestAudioRouting:
         receiver.attach_rtsp_queues(nal_q, audio_q)
 
         # PT=96 video packet with SPS NAL
-        header = bytes([0x80, 0x60, 0x00, 0x01,
-                        0x00, 0x00, 0x00, 0x00,
-                        0x00, 0x00, 0x00, 0x01])
+        header = bytes([0x80, 0x60, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01])
         rtp = header + b"\x67" + b"\x00" * 10
         receiver._process_rtp(rtp)
 
@@ -782,6 +784,7 @@ class TestIdrTracking:
 
     def test_log_idr_arrival_records_monotonic_time(self):
         import time
+
         receiver = RtpReceiver("127.0.0.1")
         before = time.monotonic()
         receiver._log_idr_arrival(0)
@@ -791,6 +794,7 @@ class TestIdrTracking:
     def test_log_idr_arrival_interval_zero_on_first_call(self, caplog):
         import logging
         from custom_components.comelit_intercom_local.const import set_verbose_logging
+
         set_verbose_logging(True)
         try:
             receiver = RtpReceiver("127.0.0.1")
@@ -804,6 +808,7 @@ class TestIdrTracking:
     def test_log_idr_arrival_logs_at_debug(self, caplog):
         import logging
         from custom_components.comelit_intercom_local.const import set_verbose_logging
+
         set_verbose_logging(True)
         try:
             receiver = RtpReceiver("127.0.0.1")
