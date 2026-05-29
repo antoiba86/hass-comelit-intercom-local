@@ -17,9 +17,7 @@ class TestAuthenticate:
         channel = MagicMock()
         client = MagicMock()
         client.open_channel = AsyncMock(return_value=channel)
-        client.send_json = AsyncMock(
-            return_value={"response-code": 200, "response-string": "OK"}
-        )
+        client.send_json = AsyncMock(return_value={"response-code": 200, "response-string": "OK"})
 
         await authenticate(client, "abcdef1234567890abcdef1234567890")
 
@@ -35,9 +33,7 @@ class TestAuthenticate:
         channel = MagicMock()
         client = MagicMock()
         client.open_channel = AsyncMock(return_value=channel)
-        client.send_json = AsyncMock(
-            return_value={"response-code": 403, "response-string": "Forbidden"}
-        )
+        client.send_json = AsyncMock(return_value={"response-code": 403, "response-string": "Forbidden"})
 
         with pytest.raises(AuthenticationError, match="403"):
             await authenticate(client, "sometoken")
@@ -59,9 +55,7 @@ class TestAuthenticate:
         channel = MagicMock()
         client = MagicMock()
         client.open_channel = AsyncMock(return_value=channel)
-        client.send_json = AsyncMock(
-            return_value={"response-code": 401, "response-string": "Invalid token"}
-        )
+        client.send_json = AsyncMock(return_value={"response-code": 401, "response-string": "Invalid token"})
 
         with pytest.raises(AuthenticationError, match="Invalid token"):
             await authenticate(client, "badtoken")
@@ -75,6 +69,7 @@ class TestAuthenticate:
         client.send_json = AsyncMock(return_value={"response-code": 200})
 
         from custom_components.comelit_intercom_local.channels import ChannelType
+
         await authenticate(client, "token")
 
         client.open_channel.assert_called_once_with("UAUT", ChannelType.UAUT)

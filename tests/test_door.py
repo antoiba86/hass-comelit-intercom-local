@@ -90,9 +90,7 @@ class TestOpenDoorFastPath:
         config = _make_config()
         door = _make_door()
 
-        with patch(
-            "custom_components.comelit_intercom_local.door.IconaBridgeClient"
-        ) as mock_cls:
+        with patch("custom_components.comelit_intercom_local.door.IconaBridgeClient") as mock_cls:
             await open_door(HOST, PORT, TOKEN, client, config, door)
 
         mock_cls.assert_not_called()

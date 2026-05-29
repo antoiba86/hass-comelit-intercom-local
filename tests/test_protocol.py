@@ -92,9 +92,7 @@ class TestChannelOpen:
         assert ch_type == ChannelType.UAUT
 
     def test_encode_channel_open_with_extra_data(self):
-        packet = encode_channel_open(
-            "CTPP", ChannelType.CTPP, sequence=1, request_id=8001, extra_data="000000010"
-        )
+        packet = encode_channel_open("CTPP", ChannelType.CTPP, sequence=1, request_id=8001, extra_data="000000010")
         body = packet[HEADER_SIZE:]
         # extra_data should appear somewhere in the body
         assert b"000000010\x00" in body
@@ -132,18 +130,14 @@ class TestDoorPayloads:
         assert payload[:4] == bytes([0xC0, 0x18, 0x5C, 0x8B])
 
     def test_open_door_message(self):
-        payload = encode_open_door(
-            MessageType.OPEN_DOOR, "00000001", 1, "00000000"
-        )
+        payload = encode_open_door(MessageType.OPEN_DOOR, "00000001", 1, "00000000")
         # starts with OPEN_DOOR type LE
         assert payload[:2] == struct.pack("<H", MessageType.OPEN_DOOR)
         assert b"000000011\x00" in payload  # apt_address + output_index
         assert b"00000000\x00" in payload  # door_apt_address
 
     def test_open_door_confirm_message(self):
-        payload = encode_open_door(
-            MessageType.OPEN_DOOR_CONFIRM, "00000001", 1, "00000000"
-        )
+        payload = encode_open_door(MessageType.OPEN_DOOR_CONFIRM, "00000001", 1, "00000000")
         assert payload[:2] == struct.pack("<H", MessageType.OPEN_DOOR_CONFIRM)
 
     def test_door_init_contains_output_index(self):
@@ -220,9 +214,7 @@ class TestAnswerSequencePayloads:
 
     def test_encode_answer_video_reconfig_custom_resolution(self):
         """encode_answer_video_reconfig accepts custom width/height/fps."""
-        msg = encode_answer_video_reconfig(
-            "SB0000061", "SB000006", 0xABCD, 0x12345678, width=640, height=360, fps=25
-        )
+        msg = encode_answer_video_reconfig("SB0000061", "SB000006", 0xABCD, 0x12345678, width=640, height=360, fps=25)
         assert struct.pack("<H", 640) in msg
         assert struct.pack("<H", 360) in msg
 
@@ -335,10 +327,7 @@ class TestDoorOpenDuringVideo:
         #   "SB100001\0\0" 01 00 00 00 ff ff ff ff
         #   "SB0000062\0" "SB000006\0\0"
         expected = bytes.fromhex(
-            "401882d38a88000d002d"
-            "53423130303030310000"
-            "01000000ffffffff"
-            "5342303030303036320053423030303030360000"
+            "401882d38a88000d002d5342313030303031000001000000ffffffff5342303030303036320053423030303030360000"
         )
         msg = encode_door_open_during_video(
             our_addr="SB0000062",
@@ -350,9 +339,7 @@ class TestDoorOpenDuringVideo:
         assert msg == expected, msg.hex()
 
     def test_trailing_field_is_apt_addr_not_entrance(self):
-        msg = encode_door_open_during_video(
-            "SB0000062", "SB100001", 0, 1, apt_addr="SB000006"
-        )
+        msg = encode_door_open_during_video("SB0000062", "SB100001", 0, 1, apt_addr="SB000006")
         # last 10 bytes = apt_addr, NOT entrance_addr
         assert msg[-10:] == b"SB000006\x00\x00"
 

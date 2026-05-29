@@ -35,6 +35,7 @@ class TestCtppInitSequence:
 
         with pytest.MonkeyPatch().context() as mp:
             from custom_components.comelit_intercom_local import ctpp as ctpp_mod
+
             sent = []
             client.send_binary = AsyncMock(side_effect=lambda ch, data: sent.append(data))
             await ctpp_init_sequence(client, channel, "SB000006", 1, "SB0000061", 0x12345678)
@@ -99,7 +100,12 @@ class TestCtppInitSequence:
 
         # Must not raise
         await ctpp_init_sequence(
-            client, channel, "SB000006", 1, "SB0000061", 0x10000000,
+            client,
+            channel,
+            "SB000006",
+            1,
+            "SB0000061",
+            0x10000000,
             response_timeout=0.1,
         )
 
@@ -131,7 +137,12 @@ class TestCtppInitSequence:
         client.send_binary = AsyncMock(side_effect=lambda ch, data: sent.append(data))
 
         await ctpp_init_sequence(
-            client, channel, "SB000006", 1, "SB0000061", 0x10000000,
+            client,
+            channel,
+            "SB000006",
+            1,
+            "SB0000061",
+            0x10000000,
             send_ack=False,
         )
 
@@ -144,7 +155,12 @@ class TestCtppInitSequence:
         channel = MagicMock()
 
         await ctpp_init_sequence(
-            client, channel, "SB000006", 1, "SB0000061", 0x10000000,
+            client,
+            channel,
+            "SB000006",
+            1,
+            "SB0000061",
+            0x10000000,
             send_ack=False,
         )
 
@@ -170,8 +186,7 @@ class TestCtppInitSequence:
         for ack in sent[1:3]:
             actual_ts = struct.unpack_from("<I", ack, 2)[0]
             assert actual_ts == expected_ts, (
-                f"ACK ts 0x{actual_ts:08X} should be init_ts+CTR (0x{expected_ts:08X}), "
-                f"not device_ts-derived"
+                f"ACK ts 0x{actual_ts:08X} should be init_ts+CTR (0x{expected_ts:08X}), not device_ts-derived"
             )
 
     @pytest.mark.asyncio

@@ -38,12 +38,7 @@ _MAGIC = b"\x00\x06"
 
 def _hdr(body: bytes | bytearray, req_id: int = 0) -> bytes:
     """Build an 8-byte ICONA Bridge packet header."""
-    return (
-        _MAGIC
-        + struct.pack("<H", len(body))
-        + struct.pack("<H", req_id)
-        + b"\x00\x00"
-    )
+    return _MAGIC + struct.pack("<H", len(body)) + struct.pack("<H", req_id) + b"\x00\x00"
 
 
 def _pkt(body: bytes | bytearray, req_id: int = 0) -> bytes:
@@ -56,7 +51,7 @@ def _command_response(server_ch_id: int, extra: bytes = b"") -> bytes:
     """COMMAND response body sent by the device to acknowledge a channel open."""
     body = bytearray(10)
     struct.pack_into("<H", body, 0, 0xABCD)  # COMMAND
-    struct.pack_into("<H", body, 2, 2)        # seq=2
+    struct.pack_into("<H", body, 2, 2)  # seq=2
     struct.pack_into("<H", body, 8, server_ch_id)
     return _pkt(bytes(body) + extra)
 
@@ -71,7 +66,7 @@ def _ctpp_pkt(server_ch_id: int, prefix: int, action: int, flags: int = 0) -> by
     callee = "SB0000061"
     body = bytearray()
     body += struct.pack("<H", prefix)
-    body += struct.pack("<I", 0)            # timestamp (device-side, ignored by client)
+    body += struct.pack("<I", 0)  # timestamp (device-side, ignored by client)
     body += struct.pack(">H", action)
     body += struct.pack(">H", flags)
     body += b"\xff\xff\xff\xff"
@@ -88,10 +83,10 @@ def _device_rtpc_open(dev_req_id: int) -> bytes:
     """
     body = bytearray()
     body += struct.pack("<HH", 0xABCD, 1)  # COMMAND, seq=1
-    body += struct.pack("<I", 7)            # ChannelType.UAUT = 7
-    body += b"RTPC"                         # 4-char name, no null
-    body += struct.pack("<H", dev_req_id)   # request_id (landed at body[-3:-1])
-    body += bytes([1])                      # trailing_byte
+    body += struct.pack("<I", 7)  # ChannelType.UAUT = 7
+    body += b"RTPC"  # 4-char name, no null
+    body += struct.pack("<H", dev_req_id)  # request_id (landed at body[-3:-1])
+    body += bytes([1])  # trailing_byte
     return _pkt(bytes(body), 0)
 
 
@@ -138,9 +133,7 @@ class FakeComelitDevice:
         return self._server.sockets[0].getsockname()[1]
 
     async def start(self) -> None:
-        self._server = await asyncio.start_server(
-            self._handle, "127.0.0.1", 0
-        )
+        self._server = await asyncio.start_server(self._handle, "127.0.0.1", 0)
 
     async def stop(self) -> None:
         if self._server:
@@ -168,9 +161,7 @@ class FakeComelitDevice:
     # Connection handler
     # ------------------------------------------------------------------
 
-    async def _handle(
-        self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
-    ) -> None:
+    async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         self._writer = writer
         try:
             while True:
@@ -271,11 +262,11 @@ class FakeComelitDevice:
                 await self._on_call_init()
 
         elif prefix == 0x1840:
-            if action == 0x0008:                  # codec_ack
+            if action == 0x0008:  # codec_ack
                 await self._on_codec_ack()
-            elif action == 0x001A:                # VIDEO_CONFIG
+            elif action == 0x001A:  # VIDEO_CONFIG
                 await self._on_video_config()
-            elif action == 0x0000:                # HANGUP/ZERO (call accepted signal)
+            elif action == 0x0000:  # HANGUP/ZERO (call accepted signal)
                 await self._on_hangup_zero()
             # 0x000A (rtpc_link from client), other → ignore
 

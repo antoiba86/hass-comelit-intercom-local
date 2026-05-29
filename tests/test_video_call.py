@@ -203,8 +203,13 @@ class TestCtppMonitorLoop:
         mock_ctpp = MagicMock()
 
         await session._ctpp_monitor_loop(
-            mock_client, mock_ctpp, "SB0000061", "SB100001", 0x10000000,
-            rtpc1_server_id=0xABCD, media_req_id=0x1234,
+            mock_client,
+            mock_ctpp,
+            "SB0000061",
+            "SB100001",
+            0x10000000,
+            rtpc1_server_id=0xABCD,
+            media_req_id=0x1234,
         )
 
         # An ACK (0x1800 prefix) should have been sent
@@ -220,11 +225,7 @@ class TestCtppMonitorLoop:
         session = self._make_session()
 
         mock_client = MagicMock()
-        call_end_body = (
-            struct.pack("<H", 0x1840)
-            + struct.pack("<I", 0x12345678)
-            + struct.pack(">H", 0x0003)
-        )
+        call_end_body = struct.pack("<H", 0x1840) + struct.pack("<I", 0x12345678) + struct.pack(">H", 0x0003)
         call_count = 0
 
         async def mock_read_response(channel, timeout=2.0):
@@ -248,8 +249,13 @@ class TestCtppMonitorLoop:
         session._inline_reestablish = mock_reestablish
 
         await session._ctpp_monitor_loop(
-            mock_client, MagicMock(), "SB0000061", "SB100001", 0x10000000,
-            rtpc1_server_id=0xABCD, media_req_id=0x1234,
+            mock_client,
+            MagicMock(),
+            "SB0000061",
+            "SB100001",
+            0x10000000,
+            rtpc1_server_id=0xABCD,
+            media_req_id=0x1234,
         )
 
         assert reestablish_called
@@ -264,11 +270,7 @@ class TestCtppMonitorLoop:
         session = self._make_session()
 
         mock_client = MagicMock()
-        call_end_body = (
-            struct.pack("<H", 0x1840)
-            + struct.pack("<I", 0x12345678)
-            + struct.pack(">H", 0x0003)
-        )
+        call_end_body = struct.pack("<H", 0x1840) + struct.pack("<I", 0x12345678) + struct.pack(">H", 0x0003)
         call_count = 0
 
         async def mock_read_response(channel, timeout=2.0):
@@ -289,8 +291,13 @@ class TestCtppMonitorLoop:
 
         # Must not raise; loop exits on next read returning None
         await session._ctpp_monitor_loop(
-            mock_client, MagicMock(), "SB0000061", "SB100001", 0x10000000,
-            rtpc1_server_id=0xABCD, media_req_id=0x1234,
+            mock_client,
+            MagicMock(),
+            "SB0000061",
+            "SB100001",
+            0x10000000,
+            rtpc1_server_id=0xABCD,
+            media_req_id=0x1234,
         )
 
     @pytest.mark.asyncio
@@ -303,6 +310,7 @@ class TestCtppMonitorLoop:
         alive, just like a timer-triggered CALL_END (sub=0x0000).
         """
         import struct
+
         session = self._make_session()
 
         mock_client = MagicMock()
@@ -336,8 +344,13 @@ class TestCtppMonitorLoop:
         session._inline_reestablish = mock_reestablish
 
         await session._ctpp_monitor_loop(
-            mock_client, MagicMock(), "SB0000061", "SB100001", 0x10000000,
-            rtpc1_server_id=0xABCD, media_req_id=0x1234,
+            mock_client,
+            MagicMock(),
+            "SB0000061",
+            "SB100001",
+            0x10000000,
+            rtpc1_server_id=0xABCD,
+            media_req_id=0x1234,
         )
 
         assert reestablish_called
@@ -366,8 +379,13 @@ class TestCtppMonitorLoop:
         mock_client.send_binary = AsyncMock(side_effect=lambda ch, data: sent_data.append(data))
 
         await session._ctpp_monitor_loop(
-            mock_client, MagicMock(), "SB0000061", "SB100001", 0x10000000,
-            rtpc1_server_id=0xABCD, media_req_id=0x1234,
+            mock_client,
+            MagicMock(),
+            "SB0000061",
+            "SB100001",
+            0x10000000,
+            rtpc1_server_id=0xABCD,
+            media_req_id=0x1234,
         )
 
         assert len(sent_data) == 0  # no response to device ACKs
@@ -392,11 +410,7 @@ class TestCtppMonitorLoop:
             nonlocal call_count
             call_count += 1
             if call_count == 1:
-                return (
-                    struct.pack("<H", 0x1860)
-                    + struct.pack("<I", 0xCAFEBABE)
-                    + struct.pack(">H", 0x000A)
-                )
+                return struct.pack("<H", 0x1860) + struct.pack("<I", 0xCAFEBABE) + struct.pack(">H", 0x000A)
             session._active = False
             return None
 
@@ -404,8 +418,13 @@ class TestCtppMonitorLoop:
         mock_client.send_binary = AsyncMock(side_effect=lambda ch, data: sent_data.append(data))
 
         await session._ctpp_monitor_loop(
-            mock_client, MagicMock(), "SB0000061", "SB100001", 0x10000000,
-            rtpc1_server_id=0xABCD, media_req_id=0x1234,
+            mock_client,
+            MagicMock(),
+            "SB0000061",
+            "SB100001",
+            0x10000000,
+            rtpc1_server_id=0xABCD,
+            media_req_id=0x1234,
         )
 
         assert len(sent_data) == 1
@@ -445,19 +464,13 @@ class TestAckDeviceRtpcLink:
             nonlocal call_count
             call_count += 1
             if call_count == 1:
-                return (
-                    struct.pack("<H", 0x1840)
-                    + struct.pack("<I", 0x11223344)
-                    + struct.pack(">H", 0x000A)
-                )
+                return struct.pack("<H", 0x1840) + struct.pack("<I", 0x11223344) + struct.pack(">H", 0x000A)
             return None
 
         mock_client.read_response = mock_read_response
         mock_client.send_binary = AsyncMock(side_effect=lambda ch, data: sent_data.append(data))
 
-        result = await session._ack_device_rtpc_link(
-            mock_client, MagicMock(), "SB0000061", "SB100001", 0x10000000
-        )
+        result = await session._ack_device_rtpc_link(mock_client, MagicMock(), "SB0000061", "SB100001", 0x10000000)
 
         assert len(sent_data) == 1
         prefix = struct.unpack_from("<H", sent_data[0], 0)[0]
@@ -483,19 +496,13 @@ class TestAckDeviceRtpcLink:
             nonlocal call_count
             call_count += 1
             if call_count == 1:
-                return (
-                    struct.pack("<H", 0x1860)
-                    + struct.pack("<I", 0x11223344)
-                    + struct.pack(">H", 0x000A)
-                )
+                return struct.pack("<H", 0x1860) + struct.pack("<I", 0x11223344) + struct.pack(">H", 0x000A)
             return None
 
         mock_client.read_response = mock_read_response
         mock_client.send_binary = AsyncMock(side_effect=lambda ch, data: sent_data.append(data))
 
-        result = await session._ack_device_rtpc_link(
-            mock_client, MagicMock(), "SB0000061", "SB100001", 0x10000000
-        )
+        result = await session._ack_device_rtpc_link(mock_client, MagicMock(), "SB0000061", "SB100001", 0x10000000)
 
         assert len(sent_data) == 1, "Device 0x1860/0x000A RTPC link was not ACKed"
         prefix = struct.unpack_from("<H", sent_data[0], 0)[0]
@@ -518,19 +525,13 @@ class TestAckDeviceRtpcLink:
             if call_count == 1:
                 return struct.pack("<H", 0x1800) + struct.pack("<I", 0) + struct.pack(">H", 0)
             if call_count == 2:
-                return (
-                    struct.pack("<H", 0x1860)
-                    + struct.pack("<I", 0x99887766)
-                    + struct.pack(">H", 0x000A)
-                )
+                return struct.pack("<H", 0x1860) + struct.pack("<I", 0x99887766) + struct.pack(">H", 0x000A)
             return None
 
         mock_client.read_response = mock_read_response
         mock_client.send_binary = AsyncMock(side_effect=lambda ch, data: sent_data.append(data))
 
-        await session._ack_device_rtpc_link(
-            mock_client, MagicMock(), "SB0000061", "SB100001", 0x10000000
-        )
+        await session._ack_device_rtpc_link(mock_client, MagicMock(), "SB0000061", "SB100001", 0x10000000)
 
         assert len(sent_data) == 1
         prefix = struct.unpack_from("<H", sent_data[0], 0)[0]
@@ -574,11 +575,7 @@ class TestInlineReestablish:
         # ctpp_init_sequence reads up to 2 responses; call_init reads 1;
         # _run_codec_exchange reads until 0x0002 (call accepted).
         def make_0x1840(action: int) -> bytes:
-            return (
-                struct.pack("<H", 0x1840)
-                + struct.pack("<I", 0xDEADBEEF)
-                + struct.pack(">H", action)
-            )
+            return struct.pack("<H", 0x1840) + struct.pack("<I", 0xDEADBEEF) + struct.pack(">H", action)
 
         def make_0x1800() -> bytes:
             return struct.pack("<H", 0x1800) + struct.pack("<I", 0) + struct.pack(">H", 0)
@@ -589,11 +586,11 @@ class TestInlineReestablish:
         # [3]   codec exchange: 0x0002 = call accepted
         # [4+]  _ack_device_rtpc_link: returns None (timeout suppressed)
         responses = [
-            make_0x1800(),        # ctpp_init drain 1
-            make_0x1800(),        # ctpp_init drain 2
+            make_0x1800(),  # ctpp_init drain 1
+            make_0x1800(),  # ctpp_init drain 2
             make_0x1840(0x0001),  # call_init ACK (any action)
             make_0x1840(0x0002),  # codec exchange: call accepted
-            None,                 # _ack_device_rtpc_link timeout
+            None,  # _ack_device_rtpc_link timeout
         ]
 
         async def mock_read_response(channel, timeout=2.0):
@@ -622,22 +619,23 @@ class TestInlineReestablish:
         session._ts = lambda: fixed_ts
 
         await session._inline_reestablish(
-            mock_client, mock_ctpp,
-            our_addr, entrance_addr,
-            rtpc1_server_id, media_req_id,
+            mock_client,
+            mock_ctpp,
+            our_addr,
+            entrance_addr,
+            rtpc1_server_id,
+            media_req_id,
             call_counter=0x00010000,
         )
 
         sent_prefixes = [struct.unpack_from("<H", d, 0)[0] for d in sent_data]
-        sent_actions = [
-            struct.unpack_from(">H", d, 6)[0] if len(d) >= 8 else 0
-            for d in sent_data
-        ]
+        sent_actions = [struct.unpack_from(">H", d, 6)[0] if len(d) >= 8 else 0 for d in sent_data]
 
         # RTPC_LINK: prefix 0x1840, action 0x000A
         ACTION_RTPC_LINK = 0x000A
         rtpc_link_messages = [
-            d for d in sent_data
+            d
+            for d in sent_data
             if len(d) >= 8
             and struct.unpack_from("<H", d, 0)[0] == 0x1840
             and struct.unpack_from(">H", d, 6)[0] == ACTION_RTPC_LINK
@@ -648,7 +646,8 @@ class TestInlineReestablish:
         # Verify it matches what encode_video_config would produce (not _resp).
         # encode_video_config uses prefix 0x1840; encode_video_config_resp uses 0x1860.
         video_config_messages = [
-            d for d in sent_data
+            d
+            for d in sent_data
             if len(d) >= 8
             and struct.unpack_from("<H", d, 0)[0] == 0x1840
             and struct.unpack_from(">H", d, 6)[0] not in (ACTION_RTPC_LINK, 0x0000, 0x0070)
