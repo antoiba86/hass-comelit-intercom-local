@@ -174,7 +174,7 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
         # Start VIP event listener for doorbell ring detection, unless disabled.
         # The PUSH channel is one-shot FCM registration; actual call events
         # arrive as binary VIP messages on the CTPP channel.
-        if self.config_entry.options.get(CONF_ENABLE_NOTIFICATIONS, True):
+        if self.notifications_enabled:
             try:
                 init_ts = await self._open_ctpp_channels(client, self._config)
                 vip = VipEventListener(
@@ -265,7 +265,7 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
         self._client = client
         client.set_disconnect_callback(self._on_client_disconnect)
 
-        if self.config_entry.options.get(CONF_ENABLE_NOTIFICATIONS, True):
+        if self.notifications_enabled:
             try:
                 init_ts = await self._open_ctpp_channels(client, self._config)
                 vip = VipEventListener(
@@ -344,6 +344,7 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
     @property
     def notifications_enabled(self) -> bool:
         """Return True when push notifications are enabled in options."""
+        assert self.config_entry is not None
         return self.config_entry.options.get(CONF_ENABLE_NOTIFICATIONS, True)
 
     def add_vip_state_change_callback(self, callback: Callable[[], Awaitable[None]]) -> Callable[[], None]:
@@ -570,7 +571,7 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
 
         while True:
             await asyncio.sleep(KEEPALIVE_INTERVAL)
-            if not self._client or not self._client.connected:
+            if not self._client or not self._client.connected or not self._config:
                 return
             try:
                 await asyncio.wait_for(
@@ -597,7 +598,7 @@ class ComelitLocalCoordinator(DataUpdateCoordinator[DeviceConfig]):
         """
         if self._vip_listener or not self._config or not self._client:
             return
-        if not self.config_entry.options.get(CONF_ENABLE_NOTIFICATIONS, True):
+        if not self.notifications_enabled:
             return
         try:
             vip = VipEventListener(

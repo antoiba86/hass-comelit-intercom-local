@@ -70,6 +70,7 @@ class IconaBridgeClient:
         # Enable TCP keepalives so the OS detects when the device goes to sleep
         # without sending a FIN. Without this, the connection appears alive
         # indefinitely and we never reconnect — missing doorbell ring events.
+        assert self._writer is not None
         sock = self._writer.transport.get_extra_info("socket")
         if sock is not None:
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)

@@ -65,6 +65,7 @@ async def ctpp_init_sequence(
     )
 
     if send_ack and not fast_ack_sent:
+        assert timestamp is not None
         ack_ts = (timestamp + _VIP_ACK_TS_INCR) & 0xFFFFFFFF
         await client.send_binary(channel, encode_call_response_ack(our_addr, apt_addr, ack_ts))
         await client.send_binary(channel, encode_call_response_ack(our_addr, apt_addr, ack_ts, prefix=0x1820))
@@ -109,3 +110,5 @@ async def read_response_ctpp(
         else:
             if is_verbose_logging():
                 _LOGGER.debug("CTPP init response %d: no response (timeout)", i + 1)
+
+    return False

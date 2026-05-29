@@ -40,7 +40,7 @@ async def _register_static_path(hass: HomeAssistant, url: str, path: str) -> Non
 
         await hass.http.async_register_static_paths([StaticPathConfig(url, path, cache_headers=True)])
     else:
-        hass.http.register_static_path(url, path)
+        hass.http.register_static_path(url, path)  # type: ignore[attr-defined]
 
 
 async def _init_resource(hass: HomeAssistant, url: str, version: str) -> None:

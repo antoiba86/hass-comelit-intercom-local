@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 
-from homeassistant.components.event import DoorbellEventType, EventDeviceClass, EventEntity
+from homeassistant.components.event import EventDeviceClass, EventEntity
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -15,7 +15,7 @@ from .models import PushEvent
 
 _LOGGER = logging.getLogger(__name__)
 
-EVENT_TYPES = [DoorbellEventType.RING, "missed_call"]
+EVENT_TYPES = ["ring", "missed_call"]
 
 
 async def async_setup_entry(
