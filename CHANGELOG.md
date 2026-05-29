@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.1.4.5
+
+> **⚠ Breaking change — doorbell event type renamed**
+>
+> The VIP event type `doorbell_ring` has been renamed to `ring`. Update any automations or templates
+> that trigger on `event_type: ring` with `event_data.event_type: doorbell_ring` to use `ring` instead.
+
+**Bug fixes:**
+- **Fix: door open during video sent wrong address** — trailing 10 bytes in `encode_door_open_during_video` now correctly use `apt_addr` (apartment address without subaddress, e.g. `SB000006`) instead of `entrance_addr`; the earlier PCAP happened to have them equal, masking the bug
+- **Fix: CTPP/CSPB channel types in VIP listener** — `open_ctpp_channel` was passing `ChannelType.UAUT` for both channels; now uses `ChannelType.CTPP` and `ChannelType.CSPB`
+- **Fix: VIP ACK timestamp computation** — the increment used for VIP channel ACKs was `0x01010000` (both sub-counters); PCAP shows only the high sub-counter increments on VIP channels (`0x01000000`). Video sessions are unaffected.
+- **Fix: `_send_event_ack` timestamp and target address** — ACK timestamp is now derived from the device's event timestamp via a byte-level transformation (`_derive_event_ack_ts`); target address is `apt_address` (not the entrance address)
+- **Fix: false-positive `door_opened` events** — `0x1860/0x0003` fired by the apartment's own FSM (caller = `apt_address`) after a missed or abandoned ring no longer triggers `door_opened`; only entrance-originated opens are reported
+- **Fix: `async_stop_video` teardown** — wrapped in `try/finally` so RTSP clients are disconnected and the VIP listener is restarted even if `session.stop()` raises
+- **Fix: reconnect resilience** — first reconnect failure now logs a warning and retries instead of immediately raising `UpdateFailed`; `connect()` retries up to 4 times with 0.3 s backoff on `ECONNREFUSED`
+
+**New features:**
+- **`missed_call` event** — `0x1840/0x0000` (call ended unanswered) now fires a `missed_call` event on the doorbell entity
+- **Notification service sensor** — new diagnostic binary sensor (`binary_sensor.<name>_notification_service`) reflecting whether the VIP event listener is active; unavailable when notifications are disabled
+- **Restart notifications button** — new diagnostic button (`button.<name>_restart_notifications`) to manually restart the VIP event listener without a full integration reload
+- **VIP listener supervisor** — the listener loop now auto-restarts after unhandled exceptions (up to 5 times in 60 s); if the limit is exceeded it escalates to the coordinator for a full reconnect
+- **Observability counters** — `VipEventListener` exposes `decode_misses` (unknown `(prefix, action)` pairs) and `restart_count` for diagnostics
+
 ## 0.1.4.4
 
 - **Verbose logging option** — new toggle in the integration options (Settings → Integrations → Configure) to enable detailed per-packet wire dump logs. When off, the chatty sub-loggers (`client`, `rtp_receiver`, `rtsp_server`) are pinned to INFO regardless of HA's logger config, keeping the log clean under normal operation.

@@ -57,7 +57,9 @@ Changing this setting reloads the integration automatically.
 | `button.comelit_intercom_stop_video_feed` | Stop the active video call |
 | `camera.comelit_intercom_live_feed` | Live video stream from the door panel via local RTSP |
 | `camera.comelit_intercom_<name>` | RTSP stream from each additional configured camera |
-| `event.comelit_intercom_doorbell` | Fires `doorbell_ring` and `missed_call` events for automations |
+| `event.comelit_intercom_doorbell` | Fires `ring`, `missed_call`, and `door_opened` events for automations |
+| `binary_sensor.comelit_intercom_notification_service` | Diagnostic — `on` when the VIP event listener is active; unavailable when notifications are disabled |
+| `button.comelit_intercom_restart_notifications` | Diagnostic — manually restart the VIP event listener without a full integration reload |
 
 ### Lovelace Cards
 
@@ -87,7 +89,15 @@ States: **Idle** (thumbnail + doorbell badge) → **Ringing** (pulsing icon + An
 
 ### Doorbell Notifications
 
-When someone rings the doorbell, `event.comelit_intercom_doorbell` fires a `doorbell_ring` event. Video does **not** start automatically — you decide what happens via automations.
+When someone rings the doorbell, `event.comelit_intercom_doorbell` fires a `ring` event. Video does **not** start automatically — you decide what happens via automations.
+
+Event types fired on `event.comelit_intercom_doorbell`:
+
+| Event type | Meaning |
+|------------|---------|
+| `ring` | Someone pressed the doorbell button |
+| `missed_call` | The ring was not answered and the call timed out |
+| `door_opened` | The entrance door was opened (e.g. by another resident) |
 
 **Basic notification:**
 
@@ -97,7 +107,7 @@ mode: single
 triggers:
   - platform: state
     entity_id: event.comelit_intercom_doorbell
-    to: "doorbell_ring"
+    to: "ring"
 conditions: []
 actions:
   - action: notify.mobile_app_your_phone
@@ -114,7 +124,7 @@ mode: single
 triggers:
   - platform: state
     entity_id: event.comelit_intercom_doorbell
-    to: "doorbell_ring"
+    to: "ring"
 conditions: []
 actions:
   - action: notify.mobile_app_your_phone
@@ -138,7 +148,7 @@ mode: single
 triggers:
   - platform: state
     entity_id: event.comelit_intercom_doorbell
-    to: "doorbell_ring"
+    to: "ring"
 conditions: []
 actions:
   - action: notify.mobile_app_your_phone
@@ -168,6 +178,19 @@ Key operations:
 - **Push channel**: Registers FCM token; also used as a 90s keepalive probe — device ACKs with JSON, preventing false reconnect cycles
 
 ## Changelog
+
+### 0.1.4.5
+
+> **⚠ Breaking change — doorbell event type renamed**
+>
+> The VIP event type `doorbell_ring` has been renamed to `ring`. Update any automations that trigger on `doorbell_ring` to use `ring` instead.
+
+- **Fix: door open during video** — trailing address field in the door-open payload now correctly uses the apartment address (`SB000006`) instead of the entrance address; the earlier PCAP happened to have them equal, masking the bug
+- **Fix: VIP ACK timestamps** — corrected the timestamp increment for VIP channel ACKs; fixes notification reliability after doorbell events
+- **Fix: false reconnect failures** — first reconnect failure now retries silently; `ECONNREFUSED` on wake-from-sleep retried up to 4 times before escalating
+- **`missed_call` event** — `event.comelit_intercom_doorbell` now fires `missed_call` when a ring goes unanswered
+- **Restart notifications button** — new diagnostic button to restart the VIP listener without a full integration reload
+- **VIP listener supervisor** — auto-restarts the listener after transient errors instead of requiring a full coordinator reconnect
 
 ### 0.1.4.4
 
