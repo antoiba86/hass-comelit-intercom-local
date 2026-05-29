@@ -77,3 +77,9 @@ exclude = ["tests/"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+# This suite stubs Home Assistant itself (see tests/conftest.py) so the unit
+# tests run standalone. The pytest-homeassistant-custom-component plugin is
+# installed for its helpers, but its global autouse hooks (socket blocking +
+# lingering-task/timer enforcement) are designed for real-HA tests and break
+# these stub-based ones. Disable the plugin's global hooks here.
+addopts = "-p no:homeassistant"

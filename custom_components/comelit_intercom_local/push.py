@@ -99,7 +99,7 @@ def _parse_push_event(raw: dict) -> PushEvent | None:
     # Known event types from community reverse-engineering
     if msg_type in ("incoming-call", "push-incoming-call"):
         return PushEvent(
-            event_type="doorbell_ring",
+            event_type="ring",
             apt_address=raw.get("apt-address", ""),
             timestamp=time.time(),
             raw=raw,
