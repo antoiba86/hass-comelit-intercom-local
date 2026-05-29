@@ -1,0 +1,62 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "comelit-intercom-local"
+version = "0.1.4.5"
+description = "Home Assistant custom component for the Comelit 6701W WiFi video intercom (local ICONA Bridge protocol)."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { file = "LICENSE" }
+dependencies = [
+    "aiohttp>=3.9",
+    "av>=12.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+    "pytest-cov",
+    "aiohttp",
+    "av",
+    "pytest-homeassistant-custom-component",
+    "pyturbojpeg",
+    "ruff",
+    "mypy",
+    "pre-commit",
+]
+
+[tool.setuptools]
+packages = ["custom_components.comelit_intercom_local"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "ASYNC", "LOG", "RUF", "TC", "PERF", "C90", "S"]
+ignore = [
+    "E501",      # line-length — project uses 120-char lines
+    "S101",      # assert — used as precondition guards in flow-protection code
+    "S105",      # hardcoded-password-string — token/constant false positives
+    "S106",      # hardcoded-password-func-arg — same
+    "TC001",     # typing-only-first-party-import — HA imports used at runtime
+    "TC002",     # typing-only-third-party-import — same
+]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 15
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "S106"]
+
+[tool.mypy]
+python_version = "3.11"
+ignore_missing_imports = true
+warn_unused_configs = true
+exclude = ["tests/"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"

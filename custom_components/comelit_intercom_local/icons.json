@@ -1,0 +1,25 @@
+{
+  "entity": {
+    "button": {
+      "door": {
+        "default": "mdi:door-open"
+      },
+      "video_start": {
+        "default": "mdi:video"
+      },
+      "video_stop": {
+        "default": "mdi:video-off"
+      }
+    },
+    "camera": {
+      "intercom_camera": {
+        "default": "mdi:doorbell-video"
+      }
+    },
+    "event": {
+      "doorbell": {
+        "default": "mdi:doorbell"
+      }
+    }
+  }
+}
