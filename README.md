@@ -1,3 +1,16 @@
+⚠️ Maintenance Paused
+Due to serious personal circumstances, I am stepping away from this repository for the foreseeable future.
+
+What this means:
+
+I will not be reviewing or merging Pull Requests.
+
+I will not be responding to Issues or direct messages regarding the project.
+
+The repository will remain open, but it is effectively unmaintained.
+
+If you need to continue working with this code, you are welcome to fork the repository and proceed independently. I appreciate your understanding and support during this time.
+
 # Comelit Intercom Local
 
 Home Assistant custom component for the **Comelit 6701W** WiFi video intercom. Communicates via the ICONA Bridge TCP protocol — no cloud required.
